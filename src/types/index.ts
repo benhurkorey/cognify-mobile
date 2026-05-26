@@ -55,8 +55,11 @@ export type TrainingStackParamList = {
     courseTitle:  string;
   };
   LessonView: {
-    lessonId:    string;
-    lessonTitle: string;
-    moduleTitle: string;
+    lessonId:     string;
+    lessonTitle:  string;
+    moduleTitle:  string;
+    enrollmentId: string;
+    companyId:    string;
+    totalLessons: number;
   };
 };

@@ -31,6 +31,7 @@ interface EnrollmentDetail {
   status:       string;
   progress_pct: number;
   due_date:     string | null;
+  company_id:   string;
   lms_courses: {
     title:             string;
     category:          string | null;
@@ -69,24 +70,26 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
   const { enrollmentId, courseId } = route.params;
   const { user }    = useAuth();
 
-  const [enrollment, setEnrollment] = useState<EnrollmentDetail | null>(null);
-  const [modules,    setModules]    = useState<Module[]>([]);
-  const [loading,    setLoading]    = useState(true);
-  const [error,      setError]      = useState<string | null>(null);
-  const [expanded,   setExpanded]   = useState<Set<string>>(new Set());
+  const [enrollment,       setEnrollment]       = useState<EnrollmentDetail | null>(null);
+  const [modules,          setModules]           = useState<Module[]>([]);
+  const [completedLessons, setCompletedLessons]  = useState<Set<string>>(new Set());
+  const [loading,          setLoading]           = useState(true);
+  const [error,            setError]             = useState<string | null>(null);
+  const [expanded,         setExpanded]          = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     if (!user?.id) return;
     setLoading(true);
     setError(null);
     try {
-      // 1 — Enrollment + course info
+      // 1 — Enrollment + course info (include company_id for progress writes)
       const { data: enrData, error: enrErr } = await supabase
         .from("lms_enrollments")
         .select(`
           status,
           progress_pct,
           due_date,
+          company_id,
           lms_courses ( title, category, description, is_mandatory, estimated_minutes )
         `)
         .eq("id", enrollmentId)
@@ -96,7 +99,7 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
       if (enrErr) throw enrErr;
       setEnrollment(enrData as unknown as EnrollmentDetail);
 
-      // 2 — Modules for this course
+      // 2 — Modules
       const { data: modData, error: modErr } = await supabase
         .from("lms_modules")
         .select("id, title, description, sort_order")
@@ -112,7 +115,7 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
         return;
       }
 
-      // 3 — All lessons for these modules
+      // 3 — Lessons
       const moduleIds = rawModules.map(m => m.id);
       const { data: lesData, error: lesErr } = await supabase
         .from("lms_lessons")
@@ -124,7 +127,26 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
       if (lesErr) throw lesErr;
       const rawLessons = (lesData ?? []) as { id: string; title: string; content_type: string; sort_order: number; module_id: string }[];
 
-      // 4 — Group lessons into modules
+      // 4 — Existing progress (which lessons are completed)
+      const allLessonIds = rawLessons.map(l => l.id);
+      if (allLessonIds.length > 0) {
+        const { data: progData } = await supabase
+          .from("lms_progress")
+          .select("lesson_id, status")
+          .eq("enrollment_id", enrollmentId)
+          .eq("user_id", user.id)
+          .in("lesson_id", allLessonIds)
+          .is("deleted_at", null);
+
+        const done = new Set<string>(
+          (progData ?? [])
+            .filter((p: any) => p.status === "completed")
+            .map((p: any) => p.lesson_id as string)
+        );
+        setCompletedLessons(done);
+      }
+
+      // 5 — Group lessons into modules
       const lessonsByModule: Record<string, Lesson[]> = {};
       for (const l of rawLessons) {
         if (!lessonsByModule[l.module_id]) lessonsByModule[l.module_id] = [];
@@ -140,7 +162,6 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
       }));
 
       setModules(built);
-      // Auto-expand first module with lessons
       const first = built.find(m => m.lessons.length > 0);
       if (first) setExpanded(new Set([first.id]));
     } catch (e) {
@@ -151,6 +172,13 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
   }, [enrollmentId, courseId, user?.id]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Re-fetch progress when returning from LessonView
+  useEffect(() => {
+    return navigation.addListener("focus", () => {
+      if (!loading) load();
+    });
+  }, [navigation, loading, load]);
 
   function toggleModule(id: string) {
     setExpanded(prev => {
@@ -165,6 +193,7 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
   const dueLabel    = dueDaysLabel(enrollment?.due_date ?? null);
   const isOverdue   = dueLabel?.startsWith("Overdue");
   const totalLessons = modules.reduce((n, m) => n + m.lessons.length, 0);
+  const companyId   = enrollment?.company_id ?? "";
 
   return (
     <SafeAreaView style={styles.safe} edges={["bottom"]}>
@@ -187,7 +216,6 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
 
           {/* Course hero card */}
           <View style={styles.heroCard}>
-            {/* Status + due */}
             <View style={styles.heroMeta}>
               <View style={styles.statusLeft}>
                 <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
@@ -205,7 +233,6 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
               )}
             </View>
 
-            {/* Meta row */}
             <View style={styles.metaRow}>
               {course?.category && (
                 <View style={styles.chip}><Text style={styles.chipText}>{course.category}</Text></View>
@@ -220,12 +247,10 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
               )}
             </View>
 
-            {/* Description */}
             {course?.description ? (
               <Text style={styles.description}>{course.description}</Text>
             ) : null}
 
-            {/* Progress */}
             <View style={styles.progressSection}>
               <View style={styles.progressHeader}>
                 <Text style={styles.progressLabel}>Your progress</Text>
@@ -239,10 +264,15 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
                   backgroundColor: statusColor,
                 }]} />
               </View>
+              {totalLessons > 0 && (
+                <Text style={styles.lessonProgress}>
+                  {completedLessons.size} of {totalLessons} lesson{totalLessons !== 1 ? "s" : ""} complete
+                </Text>
+              )}
             </View>
           </View>
 
-          {/* Modules section */}
+          {/* Modules */}
           {modules.length === 0 ? (
             <View style={styles.emptyModules}>
               <Text style={styles.emptyIcon}>📖</Text>
@@ -257,7 +287,11 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
                 Course content · {modules.length} module{modules.length !== 1 ? "s" : ""}
               </Text>
               {modules.map((mod, idx) => {
-                const open = expanded.has(mod.id);
+                const open          = expanded.has(mod.id);
+                const modCompleted  = mod.lessons.filter(l => completedLessons.has(l.id)).length;
+                const modTotal      = mod.lessons.length;
+                const modDone       = modTotal > 0 && modCompleted === modTotal;
+
                 return (
                   <View key={mod.id} style={styles.moduleCard}>
                     <TouchableOpacity
@@ -265,14 +299,17 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
                       onPress={() => toggleModule(mod.id)}
                       activeOpacity={0.7}
                     >
-                      <View style={styles.moduleIndex}>
-                        <Text style={styles.moduleIndexText}>{idx + 1}</Text>
+                      <View style={[styles.moduleIndex, modDone && styles.moduleIndexDone]}>
+                        {modDone
+                          ? <Text style={styles.moduleIndexCheck}>✓</Text>
+                          : <Text style={styles.moduleIndexText}>{idx + 1}</Text>
+                        }
                       </View>
                       <View style={styles.moduleTitleWrap}>
                         <Text style={styles.moduleTitle}>{mod.title}</Text>
                         {mod.lessons.length > 0 && (
                           <Text style={styles.lessonCount}>
-                            {mod.lessons.length} lesson{mod.lessons.length !== 1 ? "s" : ""}
+                            {modCompleted}/{modTotal} lesson{modTotal !== 1 ? "s" : ""}
                           </Text>
                         )}
                       </View>
@@ -284,28 +321,34 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
                         {mod.lessons.length === 0 ? (
                           <Text style={styles.noLessonsText}>No lessons yet</Text>
                         ) : (
-                          mod.lessons.map((lesson, lIdx) => (
-                            <TouchableOpacity
-                              key={lesson.id}
-                              style={[styles.lessonRow, lIdx === mod.lessons.length - 1 && styles.lessonRowLast]}
-                              onPress={() => navigation.navigate("LessonView", {
-                                lessonId:    lesson.id,
-                                lessonTitle: lesson.title,
-                                moduleTitle: mod.title,
-                              })}
-                              activeOpacity={0.7}
-                            >
-                              <View style={styles.lessonIcon}>
-                                <Text style={styles.lessonIconText}>
-                                  {lesson.content_type === "text" ? "📄" : "▶️"}
+                          mod.lessons.map((lesson, lIdx) => {
+                            const done = completedLessons.has(lesson.id);
+                            return (
+                              <TouchableOpacity
+                                key={lesson.id}
+                                style={[styles.lessonRow, lIdx === mod.lessons.length - 1 && styles.lessonRowLast]}
+                                onPress={() => navigation.navigate("LessonView", {
+                                  lessonId:     lesson.id,
+                                  lessonTitle:  lesson.title,
+                                  moduleTitle:  mod.title,
+                                  enrollmentId,
+                                  companyId,
+                                  totalLessons,
+                                })}
+                                activeOpacity={0.7}
+                              >
+                                <View style={[styles.lessonIcon, done && styles.lessonIconDone]}>
+                                  <Text style={styles.lessonIconText}>
+                                    {done ? "✓" : lesson.content_type === "text" ? "📄" : "▶️"}
+                                  </Text>
+                                </View>
+                                <Text style={[styles.lessonTitle, done && styles.lessonTitleDone]} numberOfLines={2}>
+                                  {lesson.title}
                                 </Text>
-                              </View>
-                              <Text style={styles.lessonTitle} numberOfLines={2}>
-                                {lesson.title}
-                              </Text>
-                              <Text style={styles.lessonChevron}>›</Text>
-                            </TouchableOpacity>
-                          ))
+                                <Text style={styles.lessonChevron}>›</Text>
+                              </TouchableOpacity>
+                            );
+                          })
                         )}
                       </View>
                     )}
@@ -323,58 +366,63 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  safe:           { flex: 1, backgroundColor: colors.background },
-  scroll:         { paddingHorizontal: spacing.md, paddingTop: spacing.md, paddingBottom: spacing.xxl },
-  center:         { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl },
-  loadingText:    { marginTop: spacing.sm, fontSize: font.sizes.sm, color: colors.textSecondary },
-  errorIcon:      { fontSize: 36, marginBottom: spacing.sm },
-  errorTitle:     { fontSize: font.sizes.md, fontWeight: "700", color: colors.text },
-  errorBody:      { fontSize: font.sizes.sm, color: colors.textSecondary, textAlign: "center", marginTop: 4 },
-  retryBtn:       { marginTop: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, backgroundColor: colors.primaryLight, borderRadius: radius.sm },
-  retryText:      { fontSize: font.sizes.sm, fontWeight: "700", color: colors.primary },
+  safe:             { flex: 1, backgroundColor: colors.background },
+  scroll:           { paddingHorizontal: spacing.md, paddingTop: spacing.md, paddingBottom: spacing.xxl },
+  center:           { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl },
+  loadingText:      { marginTop: spacing.sm, fontSize: font.sizes.sm, color: colors.textSecondary },
+  errorIcon:        { fontSize: 36, marginBottom: spacing.sm },
+  errorTitle:       { fontSize: font.sizes.md, fontWeight: "700", color: colors.text },
+  errorBody:        { fontSize: font.sizes.sm, color: colors.textSecondary, textAlign: "center", marginTop: 4 },
+  retryBtn:         { marginTop: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, backgroundColor: colors.primaryLight, borderRadius: radius.sm },
+  retryText:        { fontSize: font.sizes.sm, fontWeight: "700", color: colors.primary },
 
-  heroCard:       { backgroundColor: colors.card, borderRadius: radius.lg, padding: spacing.md, ...shadow.card, marginBottom: spacing.md },
-  heroMeta:       { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.sm },
-  statusLeft:     { flexDirection: "row", alignItems: "center", gap: spacing.xs },
-  statusDot:      { width: 7, height: 7, borderRadius: radius.full },
-  statusText:     { fontSize: font.sizes.xs, fontWeight: "700" },
-  mandatoryBadge: { backgroundColor: "#FEF3C7", borderRadius: radius.sm, paddingHorizontal: 6, paddingVertical: 2 },
-  mandatoryText:  { fontSize: font.sizes.xs, fontWeight: "700", color: "#92400E" },
-  dueText:        { fontSize: font.sizes.xs, color: colors.textMuted },
-  dueOverdue:     { color: colors.danger, fontWeight: "700" },
-  metaRow:        { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs, marginBottom: spacing.sm },
-  chip:           { backgroundColor: colors.background, borderRadius: radius.sm, paddingHorizontal: 8, paddingVertical: 3 },
-  chipText:       { fontSize: font.sizes.xs, color: colors.textSecondary },
-  description:    { fontSize: font.sizes.sm, color: colors.textSecondary, lineHeight: 20, marginBottom: spacing.md },
-  progressSection:{ marginTop: 4 },
-  progressHeader: { flexDirection: "row", justifyContent: "space-between", marginBottom: 6 },
-  progressLabel:  { fontSize: font.sizes.xs, color: colors.textMuted },
-  progressPct:    { fontSize: font.sizes.xs, fontWeight: "700" },
-  progressTrack:  { height: 8, backgroundColor: colors.border, borderRadius: radius.full, overflow: "hidden" },
-  progressFill:   { height: "100%", borderRadius: radius.full },
+  heroCard:         { backgroundColor: colors.card, borderRadius: radius.lg, padding: spacing.md, ...shadow.card, marginBottom: spacing.md },
+  heroMeta:         { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.sm },
+  statusLeft:       { flexDirection: "row", alignItems: "center", gap: spacing.xs },
+  statusDot:        { width: 7, height: 7, borderRadius: radius.full },
+  statusText:       { fontSize: font.sizes.xs, fontWeight: "700" },
+  mandatoryBadge:   { backgroundColor: "#FEF3C7", borderRadius: radius.sm, paddingHorizontal: 6, paddingVertical: 2 },
+  mandatoryText:    { fontSize: font.sizes.xs, fontWeight: "700", color: "#92400E" },
+  dueText:          { fontSize: font.sizes.xs, color: colors.textMuted },
+  dueOverdue:       { color: colors.danger, fontWeight: "700" },
+  metaRow:          { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs, marginBottom: spacing.sm },
+  chip:             { backgroundColor: colors.background, borderRadius: radius.sm, paddingHorizontal: 8, paddingVertical: 3 },
+  chipText:         { fontSize: font.sizes.xs, color: colors.textSecondary },
+  description:      { fontSize: font.sizes.sm, color: colors.textSecondary, lineHeight: 20, marginBottom: spacing.md },
+  progressSection:  { marginTop: 4 },
+  progressHeader:   { flexDirection: "row", justifyContent: "space-between", marginBottom: 6 },
+  progressLabel:    { fontSize: font.sizes.xs, color: colors.textMuted },
+  progressPct:      { fontSize: font.sizes.xs, fontWeight: "700" },
+  progressTrack:    { height: 8, backgroundColor: colors.border, borderRadius: radius.full, overflow: "hidden", marginBottom: 6 },
+  progressFill:     { height: "100%", borderRadius: radius.full },
+  lessonProgress:   { fontSize: font.sizes.xs, color: colors.textMuted },
 
-  emptyModules:   { alignItems: "center", paddingTop: spacing.xxl, paddingHorizontal: spacing.lg },
-  emptyIcon:      { fontSize: 40, marginBottom: spacing.sm },
-  emptyTitle:     { fontSize: font.sizes.md, fontWeight: "700", color: colors.text },
-  emptyBody:      { fontSize: font.sizes.sm, color: colors.textSecondary, marginTop: 4, textAlign: "center", lineHeight: 20 },
+  emptyModules:     { alignItems: "center", paddingTop: spacing.xxl, paddingHorizontal: spacing.lg },
+  emptyIcon:        { fontSize: 40, marginBottom: spacing.sm },
+  emptyTitle:       { fontSize: font.sizes.md, fontWeight: "700", color: colors.text },
+  emptyBody:        { fontSize: font.sizes.sm, color: colors.textSecondary, marginTop: 4, textAlign: "center", lineHeight: 20 },
 
-  sectionTitle:   { fontSize: font.sizes.base, fontWeight: "700", color: colors.text, marginBottom: spacing.sm },
+  sectionTitle:     { fontSize: font.sizes.base, fontWeight: "700", color: colors.text, marginBottom: spacing.sm },
 
-  moduleCard:     { backgroundColor: colors.card, borderRadius: radius.md, ...shadow.card, marginBottom: spacing.sm, overflow: "hidden" },
-  moduleHeader:   { flexDirection: "row", alignItems: "center", padding: spacing.md, gap: spacing.sm },
-  moduleIndex:    { width: 28, height: 28, borderRadius: radius.full, backgroundColor: colors.primaryLight, alignItems: "center", justifyContent: "center" },
-  moduleIndexText:{ fontSize: font.sizes.xs, fontWeight: "800", color: colors.primary },
-  moduleTitleWrap:{ flex: 1 },
-  moduleTitle:    { fontSize: font.sizes.sm, fontWeight: "700", color: colors.text },
-  lessonCount:    { fontSize: font.sizes.xs, color: colors.textMuted, marginTop: 2 },
-  chevron:        { fontSize: 10, color: colors.textMuted },
+  moduleCard:       { backgroundColor: colors.card, borderRadius: radius.md, ...shadow.card, marginBottom: spacing.sm, overflow: "hidden" },
+  moduleHeader:     { flexDirection: "row", alignItems: "center", padding: spacing.md, gap: spacing.sm },
+  moduleIndex:      { width: 28, height: 28, borderRadius: radius.full, backgroundColor: colors.primaryLight, alignItems: "center", justifyContent: "center" },
+  moduleIndexDone:  { backgroundColor: colors.success },
+  moduleIndexText:  { fontSize: font.sizes.xs, fontWeight: "800", color: colors.primary },
+  moduleIndexCheck: { fontSize: font.sizes.xs, fontWeight: "800", color: colors.white },
+  moduleTitleWrap:  { flex: 1 },
+  moduleTitle:      { fontSize: font.sizes.sm, fontWeight: "700", color: colors.text },
+  lessonCount:      { fontSize: font.sizes.xs, color: colors.textMuted, marginTop: 2 },
+  chevron:          { fontSize: 10, color: colors.textMuted },
 
-  lessonList:     { borderTopWidth: 1, borderTopColor: colors.border },
-  noLessonsText:  { padding: spacing.md, fontSize: font.sizes.sm, color: colors.textMuted, textAlign: "center" },
-  lessonRow:      { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 12, paddingHorizontal: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border },
-  lessonRowLast:  { borderBottomWidth: 0 },
-  lessonIcon:     { width: 28, height: 28, borderRadius: radius.sm, backgroundColor: colors.background, alignItems: "center", justifyContent: "center" },
-  lessonIconText: { fontSize: 14 },
-  lessonTitle:    { flex: 1, fontSize: font.sizes.sm, color: colors.text },
-  lessonChevron:  { fontSize: 18, color: colors.textMuted },
+  lessonList:       { borderTopWidth: 1, borderTopColor: colors.border },
+  noLessonsText:    { padding: spacing.md, fontSize: font.sizes.sm, color: colors.textMuted, textAlign: "center" },
+  lessonRow:        { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 12, paddingHorizontal: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border },
+  lessonRowLast:    { borderBottomWidth: 0 },
+  lessonIcon:       { width: 28, height: 28, borderRadius: radius.sm, backgroundColor: colors.background, alignItems: "center", justifyContent: "center" },
+  lessonIconDone:   { backgroundColor: colors.success + "20" },
+  lessonIconText:   { fontSize: 14 },
+  lessonTitle:      { flex: 1, fontSize: font.sizes.sm, color: colors.text },
+  lessonTitleDone:  { color: colors.textMuted },
+  lessonChevron:    { fontSize: 18, color: colors.textMuted },
 });
