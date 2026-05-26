@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
+  View, Text, ScrollView, StyleSheet, Pressable, ActivityIndicator,
 } from "react-native";
 import { SafeAreaView }                         from "react-native-safe-area-context";
 import type { NativeStackScreenProps }          from "@react-navigation/native-stack";
@@ -113,15 +113,16 @@ export default function TrainingScreen({ navigation }: Props) {
       {/* Filter chips */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
         {(["all", "in_progress", "enrolled", "completed"] as FilterKey[]).map(f => (
-          <TouchableOpacity
+          <Pressable
             key={f}
             onPress={() => setFilter(f)}
-            style={[styles.chip, filter === f && styles.chipActive]}
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.chip, filter === f && styles.chipActive, pressed && { opacity: 0.7 }]}
           >
             <Text style={[styles.chipText, filter === f && styles.chipTextActive]}>
               {f === "all" ? "All" : STATUS_LABEL[f]}
             </Text>
-          </TouchableOpacity>
+          </Pressable>
         ))}
       </ScrollView>
 
@@ -136,9 +137,9 @@ export default function TrainingScreen({ navigation }: Props) {
           <Text style={styles.errorIcon}>⚠️</Text>
           <Text style={styles.errorTitle}>Couldn't load training</Text>
           <Text style={styles.errorBody}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={load}>
+          <Pressable style={styles.retryBtn} onPress={load} accessibilityRole="button">
             <Text style={styles.retryText}>Retry</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
@@ -169,15 +170,15 @@ export default function TrainingScreen({ navigation }: Props) {
               const courseId  = (course as any)?.id ?? "";
 
               return (
-                <TouchableOpacity
+                <Pressable
                   key={item.id}
-                  style={styles.card}
-                  activeOpacity={0.85}
+                  accessibilityRole="button"
                   onPress={() => navigation.navigate("CourseDetail", {
                     enrollmentId: item.id,
                     courseId,
                     courseTitle:  course?.title ?? "Course",
                   })}
+                  style={({ pressed }) => [styles.card, pressed && { opacity: 0.85 }]}
                 >
                   {/* Status row */}
                   <View style={styles.cardMeta}>
@@ -225,13 +226,13 @@ export default function TrainingScreen({ navigation }: Props) {
                   </View>
                   <Text style={styles.progressLabel}>{item.progress_pct}% complete</Text>
 
-                  {/* CTA */}
+                  {/* CTA — View only; outer Pressable card handles navigation */}
                   {item.status !== "completed" && (
-                    <TouchableOpacity style={styles.startBtn} activeOpacity={0.8}>
+                    <View style={styles.startBtn}>
                       <Text style={styles.startBtnText}>
                         {item.progress_pct > 0 ? "Continue" : "Start"}
                       </Text>
-                    </TouchableOpacity>
+                    </View>
                   )}
 
                   {/* Completed date */}
@@ -242,7 +243,7 @@ export default function TrainingScreen({ navigation }: Props) {
                       })}
                     </Text>
                   )}
-                </TouchableOpacity>
+                </Pressable>
               );
             })
           )}

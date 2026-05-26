@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View, Text, ScrollView, StyleSheet, ActivityIndicator,
-  TouchableOpacity,
+  Pressable,
 } from "react-native";
 import { SafeAreaView }                          from "react-native-safe-area-context";
 import Markdown                                  from "react-native-markdown-display";
@@ -175,9 +175,9 @@ export default function LessonScreen({ route }: Props) {
           <Text style={styles.errorIcon}>⚠️</Text>
           <Text style={styles.errorTitle}>Couldn't load lesson</Text>
           <Text style={styles.errorBody}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={load}>
+          <Pressable style={styles.retryBtn} onPress={load} accessibilityRole="button">
             <Text style={styles.retryText}>Retry</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
       ) : lesson ? (
         <>
@@ -231,10 +231,10 @@ export default function LessonScreen({ route }: Props) {
                 <Text style={styles.completedText}>✓ Lesson complete</Text>
               </View>
             ) : (
-              <TouchableOpacity
-                style={[styles.completeBtn, completing && styles.completeBtnDisabled]}
+              <Pressable
+                style={({ pressed }) => [styles.completeBtn, completing && styles.completeBtnDisabled, pressed && { opacity: 0.85 }]}
                 onPress={markComplete}
-                activeOpacity={0.85}
+                accessibilityRole="button"
                 disabled={completing}
               >
                 {completing ? (
@@ -242,7 +242,7 @@ export default function LessonScreen({ route }: Props) {
                 ) : (
                   <Text style={styles.completeBtnText}>Mark as complete</Text>
                 )}
-              </TouchableOpacity>
+              </Pressable>
             )}
           </View>
         </>

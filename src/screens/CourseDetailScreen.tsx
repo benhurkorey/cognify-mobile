@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity,
+  View, Text, ScrollView, StyleSheet, Pressable,
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView }                          from "react-native-safe-area-context";
@@ -207,9 +207,9 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
           <Text style={styles.errorIcon}>⚠️</Text>
           <Text style={styles.errorTitle}>Couldn't load course</Text>
           <Text style={styles.errorBody}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={load}>
+          <Pressable style={styles.retryBtn} onPress={load} accessibilityRole="button">
             <Text style={styles.retryText}>Retry</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -294,10 +294,10 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
 
                 return (
                   <View key={mod.id} style={styles.moduleCard}>
-                    <TouchableOpacity
-                      style={styles.moduleHeader}
+                    <Pressable
+                      style={({ pressed }) => [styles.moduleHeader, pressed && { opacity: 0.7 }]}
                       onPress={() => toggleModule(mod.id)}
-                      activeOpacity={0.7}
+                      accessibilityRole="button"
                     >
                       <View style={[styles.moduleIndex, modDone && styles.moduleIndexDone]}>
                         {modDone
@@ -314,7 +314,7 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
                         )}
                       </View>
                       <Text style={styles.chevron}>{open ? "▲" : "▼"}</Text>
-                    </TouchableOpacity>
+                    </Pressable>
 
                     {open && (
                       <View style={styles.lessonList}>
@@ -324,9 +324,9 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
                           mod.lessons.map((lesson, lIdx) => {
                             const done = completedLessons.has(lesson.id);
                             return (
-                              <TouchableOpacity
+                              <Pressable
                                 key={lesson.id}
-                                style={[styles.lessonRow, lIdx === mod.lessons.length - 1 && styles.lessonRowLast]}
+                                accessibilityRole="button"
                                 onPress={() => navigation.navigate("LessonView", {
                                   lessonId:     lesson.id,
                                   lessonTitle:  lesson.title,
@@ -335,7 +335,7 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
                                   companyId,
                                   totalLessons,
                                 })}
-                                activeOpacity={0.7}
+                                style={({ pressed }) => [styles.lessonRow, lIdx === mod.lessons.length - 1 && styles.lessonRowLast, pressed && { opacity: 0.7 }]}
                               >
                                 <View style={[styles.lessonIcon, done && styles.lessonIconDone]}>
                                   <Text style={styles.lessonIconText}>
@@ -346,7 +346,7 @@ export default function CourseDetailScreen({ route, navigation }: Props) {
                                   {lesson.title}
                                 </Text>
                                 <Text style={styles.lessonChevron}>›</Text>
-                              </TouchableOpacity>
+                              </Pressable>
                             );
                           })
                         )}
