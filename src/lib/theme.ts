@@ -1,4 +1,6 @@
 // Cognify design tokens — mobile
+import { Platform } from "react-native";
+
 export const colors = {
   primary:      "#4F46E5",  // indigo-600
   primaryDark:  "#3730A3",  // indigo-800
@@ -52,18 +54,24 @@ export const font = {
 };
 
 export const shadow = {
-  card: {
-    shadowColor:   "#000",
-    shadowOffset:  { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius:  8,
-    elevation:     3,
-  },
-  button: {
-    shadowColor:   "#4F46E5",
-    shadowOffset:  { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius:  8,
-    elevation:     4,
-  },
+  card: Platform.select({
+    web:     { boxShadow: "0 2px 8px rgba(0,0,0,0.06)" } as object,
+    default: {
+      shadowColor:   "#000",
+      shadowOffset:  { width: 0, height: 2 },
+      shadowOpacity: 0.06,
+      shadowRadius:  8,
+      elevation:     3,
+    },
+  })!,
+  button: Platform.select({
+    web:     { boxShadow: "0 4px 8px rgba(79,70,229,0.25)" } as object,
+    default: {
+      shadowColor:   "#4F46E5",
+      shadowOffset:  { width: 0, height: 4 },
+      shadowOpacity: 0.25,
+      shadowRadius:  8,
+      elevation:     4,
+    },
+  })!,
 };
