@@ -2,7 +2,7 @@ import React                                        from "react";
 import { createBottomTabNavigator }                from "@react-navigation/bottom-tabs";
 import { View, Text, StyleSheet }                  from "react-native";
 import HomeScreen                                  from "../screens/HomeScreen";
-import TrainingScreen                              from "../screens/TrainingScreen";
+import TrainingStackNavigator                      from "./TrainingStackNavigator";
 import ShiftsScreen                                from "../screens/ShiftsScreen";
 import HRScreen                                    from "../screens/HRScreen";
 import AlertsScreen                                from "../screens/AlertsScreen";
@@ -12,11 +12,11 @@ import type { TabParamList }                       from "../types";
 const Tab = createBottomTabNavigator<TabParamList>();
 
 const ICONS: Record<string, { active: string; inactive: string }> = {
-  Home:     { active: "🏠", inactive: "🏠" },
-  Training: { active: "📚", inactive: "📚" },
-  Shifts:   { active: "📅", inactive: "📅" },
-  HR:       { active: "👤", inactive: "👤" },
-  Alerts:   { active: "🔔", inactive: "🔔" },
+  Home:        { active: "🏠", inactive: "🏠" },
+  TrainingTab: { active: "📚", inactive: "📚" },
+  Shifts:      { active: "📅", inactive: "📅" },
+  HR:          { active: "👤", inactive: "👤" },
+  Alerts:      { active: "🔔", inactive: "🔔" },
 };
 
 function TabIcon({ name, focused, alertCount }: { name: string; focused: boolean; alertCount?: number }) {
@@ -50,11 +50,11 @@ export default function TabNavigator() {
         ),
       })}
     >
-      <Tab.Screen name="Home"     component={HomeScreen}     options={{ tabBarLabel: "Home"     }} />
-      <Tab.Screen name="Training" component={TrainingScreen} options={{ tabBarLabel: "Training" }} />
-      <Tab.Screen name="Shifts"   component={ShiftsScreen}   options={{ tabBarLabel: "Shifts"   }} />
-      <Tab.Screen name="HR"       component={HRScreen}       options={{ tabBarLabel: "HR"       }} />
-      <Tab.Screen name="Alerts"   component={AlertsScreen}   options={{ tabBarLabel: "Alerts"   }} />
+      <Tab.Screen name="Home"        component={HomeScreen}             options={{ tabBarLabel: "Home"     }} />
+      <Tab.Screen name="TrainingTab" component={TrainingStackNavigator} options={{ tabBarLabel: "Training", headerShown: false }} />
+      <Tab.Screen name="Shifts"      component={ShiftsScreen}           options={{ tabBarLabel: "Shifts"   }} />
+      <Tab.Screen name="HR"          component={HRScreen}               options={{ tabBarLabel: "HR"       }} />
+      <Tab.Screen name="Alerts"      component={AlertsScreen}           options={{ tabBarLabel: "Alerts"   }} />
     </Tab.Navigator>
   );
 }

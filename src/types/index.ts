@@ -40,9 +40,23 @@ export type RootStackParamList = {
 };
 
 export type TabParamList = {
-  Home:     undefined;
-  Training: undefined;
-  Shifts:   undefined;
-  HR:       undefined;
-  Alerts:   undefined;
+  Home:         undefined;
+  TrainingTab:  undefined;
+  Shifts:       undefined;
+  HR:           undefined;
+  Alerts:       undefined;
+};
+
+export type TrainingStackParamList = {
+  TrainingList: undefined;
+  CourseDetail: {
+    enrollmentId: string;
+    courseId:     string;
+    courseTitle:  string;
+  };
+  LessonView: {
+    lessonId:    string;
+    lessonTitle: string;
+    moduleTitle: string;
+  };
 };

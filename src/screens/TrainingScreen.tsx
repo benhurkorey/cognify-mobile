@@ -2,10 +2,12 @@ import React, { useState, useEffect, useCallback } from "react";
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
 } from "react-native";
-import { SafeAreaView }  from "react-native-safe-area-context";
-import { supabase }      from "../lib/supabase";
-import { useAuth }       from "../auth/AuthContext";
+import { SafeAreaView }                         from "react-native-safe-area-context";
+import type { NativeStackScreenProps }          from "@react-navigation/native-stack";
+import { supabase }                             from "../lib/supabase";
+import { useAuth }                              from "../auth/AuthContext";
 import { colors, spacing, radius, font, shadow } from "../lib/theme";
+import type { TrainingStackParamList }          from "../types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -52,7 +54,9 @@ function dueDaysLabel(due: string | null): string | null {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function TrainingScreen() {
+type Props = NativeStackScreenProps<TrainingStackParamList, "TrainingList">;
+
+export default function TrainingScreen({ navigation }: Props) {
   const { user }  = useAuth();
   const [rows,    setRows]    = useState<EnrollmentRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -158,13 +162,23 @@ export default function TrainingScreen() {
             </View>
           ) : (
             visible.map(item => {
-              const course   = item.lms_courses;
-              const dotColor = STATUS_COLOR[item.status] ?? colors.textMuted;
-              const dueLabel = dueDaysLabel(item.due_date);
+              const course    = item.lms_courses;
+              const dotColor  = STATUS_COLOR[item.status] ?? colors.textMuted;
+              const dueLabel  = dueDaysLabel(item.due_date);
               const isOverdue = dueLabel?.startsWith("Overdue");
+              const courseId  = (course as any)?.id ?? "";
 
               return (
-                <View key={item.id} style={styles.card}>
+                <TouchableOpacity
+                  key={item.id}
+                  style={styles.card}
+                  activeOpacity={0.85}
+                  onPress={() => navigation.navigate("CourseDetail", {
+                    enrollmentId: item.id,
+                    courseId,
+                    courseTitle:  course?.title ?? "Course",
+                  })}
+                >
                   {/* Status row */}
                   <View style={styles.cardMeta}>
                     <View style={styles.statusLeft}>
@@ -228,7 +242,7 @@ export default function TrainingScreen() {
                       })}
                     </Text>
                   )}
-                </View>
+                </TouchableOpacity>
               );
             })
           )}
