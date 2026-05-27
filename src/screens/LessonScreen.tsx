@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View, Text, ScrollView, StyleSheet, ActivityIndicator,
-  Pressable,
+  Pressable, Image,
 } from "react-native";
 import { SafeAreaView }                          from "react-native-safe-area-context";
 import Markdown                                  from "react-native-markdown-display";
+import { Ionicons }                              from "@expo/vector-icons";
 import type { NativeStackScreenProps }           from "@react-navigation/native-stack";
 import { supabase }                              from "../lib/supabase";
 import { useAuth }                               from "../auth/AuthContext";
-import { colors, spacing, radius, font }         from "../lib/theme";
+import { colors, spacing, radius, font, shadow } from "../lib/theme";
 import type { TrainingStackParamList }           from "../types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -19,6 +20,8 @@ interface LessonData {
   content_type:     string;
   content_body:     string | null;
   duration_seconds: number | null;
+  image_url:        string | null;
+  image_alt:        string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -50,7 +53,7 @@ export default function LessonScreen({ route }: Props) {
     try {
       const { data, error: qErr } = await supabase
         .from("lms_lessons")
-        .select("id, title, content_type, content_body, duration_seconds")
+        .select("id, title, content_type, content_body, duration_seconds, image_url, image_alt")
         .eq("id", lessonId)
         .single();
 
@@ -63,7 +66,6 @@ export default function LessonScreen({ route }: Props) {
     }
   }, [lessonId]);
 
-  // Load existing progress state
   const loadProgress = useCallback(async () => {
     if (!user?.id) return;
     const { data } = await supabase
@@ -110,7 +112,6 @@ export default function LessonScreen({ route }: Props) {
     try {
       const now = new Date().toISOString();
 
-      // 1 — Upsert progress row as completed
       const { error: progErr } = await supabase
         .from("lms_progress")
         .upsert(
@@ -128,7 +129,6 @@ export default function LessonScreen({ route }: Props) {
         );
       if (progErr) throw progErr;
 
-      // 2 — Count how many lessons are now completed for this enrollment
       const { count, error: countErr } = await supabase
         .from("lms_progress")
         .select("id", { count: "exact", head: true })
@@ -139,11 +139,7 @@ export default function LessonScreen({ route }: Props) {
       if (countErr) throw countErr;
 
       const completed = count ?? 0;
-      const newPct    = totalLessons > 0
-        ? Math.round((completed / totalLessons) * 100)
-        : 0;
-
-      // 3 — Update enrollment progress_pct (and status if fully done)
+      const newPct    = totalLessons > 0 ? Math.round((completed / totalLessons) * 100) : 0;
       const newStatus = newPct >= 100 ? "completed" : "in_progress";
       const patch: Record<string, unknown> = { progress_pct: newPct, status: newStatus };
       if (newPct >= 100) patch.completed_at = now;
@@ -156,12 +152,15 @@ export default function LessonScreen({ route }: Props) {
 
       setIsCompleted(true);
     } catch (e) {
-      // silently fail — UI stays interactable
       console.warn("markComplete error:", e);
     } finally {
       setCompleting(false);
     }
   }, [user?.id, lessonId, enrollmentId, companyId, totalLessons, completing, isCompleted]);
+
+  const typeLabel = lesson?.content_type === "text" ? "Reading" : "Video";
+  const typeIcon: React.ComponentProps<typeof Ionicons>["name"] =
+    lesson?.content_type === "text" ? "document-text-outline" : "play-circle-outline";
 
   return (
     <SafeAreaView style={styles.safe} edges={["bottom"]}>
@@ -172,10 +171,13 @@ export default function LessonScreen({ route }: Props) {
         </View>
       ) : error ? (
         <View style={styles.center}>
-          <Text style={styles.errorIcon}>⚠️</Text>
+          <View style={styles.errorIconWrap}>
+            <Ionicons name="cloud-offline-outline" size={32} color={colors.textMuted} />
+          </View>
           <Text style={styles.errorTitle}>Couldn't load lesson</Text>
           <Text style={styles.errorBody}>{error}</Text>
           <Pressable style={styles.retryBtn} onPress={load} accessibilityRole="button">
+            <Ionicons name="refresh-outline" size={14} color={colors.primary} />
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
@@ -183,27 +185,45 @@ export default function LessonScreen({ route }: Props) {
         <>
           <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
-            {/* Module breadcrumb */}
-            <Text style={styles.breadcrumb}>{moduleTitle}</Text>
+            {/* Breadcrumb */}
+            <View style={styles.breadcrumbRow}>
+              <Ionicons name="layers-outline" size={12} color={colors.textMuted} />
+              <Text style={styles.breadcrumb} numberOfLines={1}>{moduleTitle}</Text>
+            </View>
 
-            {/* Meta chips */}
-            <View style={styles.metaRow}>
-              <View style={styles.chip}>
-                <Text style={styles.chipText}>
-                  {lesson.content_type === "text" ? "📄 Reading" : "▶️ Video"}
-                </Text>
+            {/* Lesson header */}
+            <View style={styles.lessonHeader}>
+              <View style={[styles.lessonTypeIcon, { backgroundColor: colors.primaryLight }]}>
+                <Ionicons name={typeIcon} size={18} color={colors.primary} />
               </View>
-              {lesson.duration_seconds ? (
-                <View style={styles.chip}>
-                  <Text style={styles.chipText}>⏱ {formatDuration(lesson.duration_seconds)}</Text>
-                </View>
-              ) : null}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.lessonTypeLabel}>{typeLabel}</Text>
+                {lesson.duration_seconds ? (
+                  <Text style={styles.durationLabel}>
+                    {formatDuration(lesson.duration_seconds)}
+                  </Text>
+                ) : null}
+              </View>
               {isCompleted && (
-                <View style={[styles.chip, styles.chipDone]}>
-                  <Text style={[styles.chipText, styles.chipTextDone]}>✓ Completed</Text>
+                <View style={styles.completedChip}>
+                  <Ionicons name="checkmark-circle" size={13} color={colors.success} />
+                  <Text style={styles.completedChipText}>Done</Text>
                 </View>
               )}
             </View>
+
+            {/* Lesson banner image (optional) */}
+            {lesson.image_url ? (
+              <View style={styles.lessonBannerWrap}>
+                <Image
+                  source={{ uri: lesson.image_url }}
+                  style={styles.lessonBanner}
+                  resizeMode="cover"
+                  accessibilityLabel={lesson.image_alt ?? undefined}
+                  accessibilityIgnoresInvertColors
+                />
+              </View>
+            ) : null}
 
             {/* Content */}
             {lesson.content_body ? (
@@ -212,7 +232,9 @@ export default function LessonScreen({ route }: Props) {
               </View>
             ) : (
               <View style={styles.noContent}>
-                <Text style={styles.noContentIcon}>📭</Text>
+                <View style={styles.noContentIconWrap}>
+                  <Ionicons name="document-outline" size={28} color={colors.textMuted} />
+                </View>
                 <Text style={styles.noContentTitle}>Content not available</Text>
                 <Text style={styles.noContentBody}>
                   This lesson has no content yet.{"\n"}Check back later.
@@ -220,19 +242,24 @@ export default function LessonScreen({ route }: Props) {
               </View>
             )}
 
-            {/* Bottom spacer so FAB doesn't cover content */}
-            <View style={{ height: 90 }} />
+            {/* Bottom spacer so footer doesn't cover content */}
+            <View style={{ height: 96 }} />
           </ScrollView>
 
-          {/* Mark complete / completed footer */}
+          {/* ── Footer action ─────────────────────────────────────────── */}
           <View style={styles.footer}>
             {isCompleted ? (
               <View style={styles.completedBadge}>
-                <Text style={styles.completedText}>✓ Lesson complete</Text>
+                <Ionicons name="checkmark-circle" size={18} color={colors.success} />
+                <Text style={styles.completedText}>Lesson complete</Text>
               </View>
             ) : (
               <Pressable
-                style={({ pressed }) => [styles.completeBtn, completing && styles.completeBtnDisabled, pressed && { opacity: 0.85 }]}
+                style={({ pressed }) => [
+                  styles.completeBtn,
+                  completing && styles.completeBtnDisabled,
+                  pressed && { opacity: 0.88 },
+                ]}
                 onPress={markComplete}
                 accessibilityRole="button"
                 disabled={completing}
@@ -240,7 +267,10 @@ export default function LessonScreen({ route }: Props) {
                 {completing ? (
                   <ActivityIndicator color={colors.white} size="small" />
                 ) : (
-                  <Text style={styles.completeBtnText}>Mark as complete</Text>
+                  <View style={styles.completeBtnInner}>
+                    <Ionicons name="checkmark-circle-outline" size={18} color={colors.white} />
+                    <Text style={styles.completeBtnText}>Mark as complete</Text>
+                  </View>
                 )}
               </Pressable>
             )}
@@ -254,54 +284,76 @@ export default function LessonScreen({ route }: Props) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  safe:             { flex: 1, backgroundColor: colors.background },
-  scroll:           { paddingHorizontal: spacing.md, paddingTop: spacing.md },
-  center:           { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl },
-  loadingText:      { marginTop: spacing.sm, fontSize: font.sizes.sm, color: colors.textSecondary },
-  errorIcon:        { fontSize: 36, marginBottom: spacing.sm },
-  errorTitle:       { fontSize: font.sizes.md, fontWeight: "700", color: colors.text },
-  errorBody:        { fontSize: font.sizes.sm, color: colors.textSecondary, textAlign: "center", marginTop: 4 },
-  retryBtn:         { marginTop: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, backgroundColor: colors.primaryLight, borderRadius: radius.sm },
-  retryText:        { fontSize: font.sizes.sm, fontWeight: "700", color: colors.primary },
+  safe:         { flex: 1, backgroundColor: colors.background },
+  scroll:       { paddingHorizontal: spacing.md, paddingTop: spacing.md },
 
-  breadcrumb:       { fontSize: font.sizes.xs, color: colors.textMuted, marginBottom: spacing.xs },
-  metaRow:          { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs, marginBottom: spacing.md },
-  chip:             { backgroundColor: colors.card, borderRadius: radius.sm, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: colors.border },
-  chipDone:         { backgroundColor: colors.success + "15", borderColor: colors.success + "40" },
-  chipText:         { fontSize: font.sizes.xs, color: colors.textSecondary },
-  chipTextDone:     { color: colors.success, fontWeight: "700" },
+  // Center states
+  center:         { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl },
+  loadingText:    { marginTop: spacing.sm, fontSize: font.sizes.sm, color: colors.textSecondary },
+  errorIconWrap:  { width: 64, height: 64, borderRadius: radius.full, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", marginBottom: spacing.sm },
+  errorTitle:     { fontSize: font.sizes.md, fontWeight: "700", color: colors.text },
+  errorBody:      { fontSize: font.sizes.sm, color: colors.textSecondary, textAlign: "center", marginTop: 4 },
+  retryBtn:       { flexDirection: "row", alignItems: "center", gap: spacing.xs, marginTop: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, backgroundColor: colors.primaryLight, borderRadius: radius.md },
+  retryText:      { fontSize: font.sizes.sm, fontWeight: "700", color: colors.primary },
 
-  contentCard:      { backgroundColor: colors.card, borderRadius: radius.lg, padding: spacing.md, borderWidth: 1, borderColor: colors.border },
+  // Breadcrumb
+  breadcrumbRow: { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: spacing.sm },
+  breadcrumb:    { fontSize: font.sizes.xs, color: colors.textMuted, flex: 1 },
 
-  noContent:        { alignItems: "center", paddingTop: spacing.xxl },
-  noContentIcon:    { fontSize: 40, marginBottom: spacing.sm },
-  noContentTitle:   { fontSize: font.sizes.md, fontWeight: "700", color: colors.text },
-  noContentBody:    { fontSize: font.sizes.sm, color: colors.textSecondary, marginTop: 4, textAlign: "center", lineHeight: 20 },
+  // Lesson header card
+  lessonHeader:    { flexDirection: "row", alignItems: "center", gap: spacing.sm, backgroundColor: colors.card, borderRadius: radius.xl, padding: spacing.md, marginBottom: spacing.md, ...shadow.card },
+  lessonTypeIcon:  { width: 40, height: 40, borderRadius: radius.md, alignItems: "center", justifyContent: "center" },
+  lessonTypeLabel: { fontSize: font.sizes.sm, fontWeight: "700", color: colors.text },
+  durationLabel:   { fontSize: font.sizes.xs, color: colors.textMuted, marginTop: 2 },
+  completedChip:   { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.successLight, paddingHorizontal: 10, paddingVertical: 5, borderRadius: radius.full },
+  completedChipText: { fontSize: font.sizes.xs, fontWeight: "700", color: colors.success },
 
-  footer:           { paddingHorizontal: spacing.md, paddingVertical: spacing.md, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.background },
-  completeBtn:      { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: "center" },
+  // Lesson banner image
+  lessonBannerWrap: { borderRadius: radius.xl, overflow: "hidden", marginBottom: spacing.md, ...shadow.xs },
+  lessonBanner:     { width: "100%", height: 180 },
+
+  // Content
+  contentCard:      { backgroundColor: colors.card, borderRadius: radius.xl, padding: spacing.md, borderWidth: 1, borderColor: colors.cardBorder, ...shadow.xs },
+
+  // Empty content
+  noContent:         { alignItems: "center", paddingTop: spacing.xxl, gap: spacing.xs },
+  noContentIconWrap: { width: 64, height: 64, borderRadius: radius.full, backgroundColor: colors.card, alignItems: "center", justifyContent: "center", ...shadow.xs },
+  noContentTitle:    { fontSize: font.sizes.md, fontWeight: "700", color: colors.text },
+  noContentBody:     { fontSize: font.sizes.sm, color: colors.textSecondary, textAlign: "center", lineHeight: 20 },
+
+  // Footer
+  footer:           {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 4,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.background,
+    ...shadow.xs,
+  },
+  completeBtn:         { backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 15, alignItems: "center", ...shadow.button },
   completeBtnDisabled: { opacity: 0.6 },
-  completeBtnText:  { color: colors.white, fontSize: font.sizes.base, fontWeight: "700" },
-  completedBadge:   { backgroundColor: colors.success + "15", borderRadius: radius.md, paddingVertical: 14, alignItems: "center", borderWidth: 1, borderColor: colors.success + "40" },
-  completedText:    { color: colors.success, fontSize: font.sizes.base, fontWeight: "700" },
+  completeBtnInner:    { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  completeBtnText:     { color: colors.white, fontSize: font.sizes.base, fontWeight: "700" },
+  completedBadge:      { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, backgroundColor: colors.successLight, borderRadius: radius.lg, paddingVertical: 15, borderWidth: 1, borderColor: colors.success + "30" },
+  completedText:       { color: colors.success, fontSize: font.sizes.base, fontWeight: "700" },
 });
 
 // ─── Markdown styles ──────────────────────────────────────────────────────────
 
 const mdStyles = StyleSheet.create({
-  body:             { fontSize: font.sizes.base, color: colors.text, lineHeight: 26 },
-  heading1:         { fontSize: font.sizes.lg,  fontWeight: "800", color: colors.text, marginTop: spacing.md, marginBottom: spacing.sm },
-  heading2:         { fontSize: font.sizes.md,  fontWeight: "700", color: colors.text, marginTop: spacing.md, marginBottom: spacing.xs },
-  heading3:         { fontSize: font.sizes.base, fontWeight: "700", color: colors.text, marginTop: spacing.sm, marginBottom: spacing.xs },
-  paragraph:        { marginBottom: spacing.sm, fontSize: font.sizes.base, color: colors.text, lineHeight: 26 },
-  strong:           { fontWeight: "700" },
-  em:               { fontStyle: "italic" },
-  bullet_list:      { marginBottom: spacing.sm },
-  ordered_list:     { marginBottom: spacing.sm },
-  list_item:        { marginBottom: 4, fontSize: font.sizes.base, color: colors.text, lineHeight: 24 },
-  code_inline:      { backgroundColor: colors.background, borderRadius: 4, paddingHorizontal: 4, fontFamily: "monospace", fontSize: font.sizes.sm, color: colors.primaryDark },
-  code_block:       { backgroundColor: colors.background, borderRadius: radius.sm, padding: spacing.sm, marginBottom: spacing.sm },
-  blockquote:       { borderLeftWidth: 3, borderLeftColor: colors.primary, paddingLeft: spacing.sm, marginLeft: 0, marginBottom: spacing.sm },
-  hr:               { borderBottomWidth: 1, borderBottomColor: colors.border, marginVertical: spacing.md },
-  link:             { color: colors.primary, textDecorationLine: "underline" },
+  body:         { fontSize: font.sizes.base, color: colors.text, lineHeight: 28 },
+  heading1:     { fontSize: font.sizes.lg,   fontWeight: "800", color: colors.text, marginTop: spacing.md, marginBottom: spacing.sm, lineHeight: 28 },
+  heading2:     { fontSize: font.sizes.md,   fontWeight: "700", color: colors.text, marginTop: spacing.md, marginBottom: spacing.xs },
+  heading3:     { fontSize: font.sizes.base, fontWeight: "700", color: colors.text, marginTop: spacing.sm, marginBottom: spacing.xs },
+  paragraph:    { marginBottom: spacing.sm, fontSize: font.sizes.base, color: colors.text, lineHeight: 28 },
+  strong:       { fontWeight: "700" },
+  em:           { fontStyle: "italic" },
+  bullet_list:  { marginBottom: spacing.sm },
+  ordered_list: { marginBottom: spacing.sm },
+  list_item:    { marginBottom: 6, fontSize: font.sizes.base, color: colors.text, lineHeight: 26 },
+  code_inline:  { backgroundColor: colors.background, borderRadius: 4, paddingHorizontal: 5, fontFamily: "monospace", fontSize: font.sizes.sm, color: colors.primaryDark },
+  code_block:   { backgroundColor: colors.background, borderRadius: radius.md, padding: spacing.sm, marginBottom: spacing.sm },
+  blockquote:   { borderLeftWidth: 3, borderLeftColor: colors.primary, paddingLeft: spacing.sm, marginLeft: 0, marginBottom: spacing.sm, backgroundColor: colors.primaryLight, borderRadius: radius.xs },
+  hr:           { borderBottomWidth: 1, borderBottomColor: colors.border, marginVertical: spacing.md },
+  link:         { color: colors.primary, textDecorationLine: "underline" },
 });
