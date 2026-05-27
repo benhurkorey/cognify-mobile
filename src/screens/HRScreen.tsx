@@ -44,6 +44,37 @@ interface LeaveRequest {
   created_at: string;
 }
 
+interface Certificate {
+  id:                 string;
+  certificate_number: string;
+  issued_at:          string;
+  expires_at:         string | null;
+  revoked_at:         string | null;
+  lms_courses:        { title: string } | null;
+}
+
+interface PolicyAssignment {
+  id:        string;
+  policy_id: string;
+  due_date:  string | null;
+  hr_policies: {
+    id:                      string;
+    title:                   string;
+    category:                string;
+    version:                 string;
+    requires_acknowledgement: boolean;
+    effective_date:          string | null;
+    deleted_at:              string | null;
+    archived_at:             string | null;
+  } | null;
+}
+
+interface PolicyAck {
+  policy_id:      string;
+  policy_version: string;
+  acknowledged_at: string;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const LEAVE_TYPE_LABELS: Record<string, string> = {
@@ -68,12 +99,28 @@ const EMPLOYMENT_TYPE_LABELS: Record<string, string> = {
   intern:     "Intern",
 };
 
+const CERT_CATEGORY_ICONS: Record<string, React.ComponentProps<typeof Ionicons>["name"]> = {
+  general:         "document-text-outline",
+  safety:          "shield-checkmark-outline",
+  hr:              "people-outline",
+  it:              "laptop-outline",
+  finance:         "cash-outline",
+  code_of_conduct: "hand-right-outline",
+  other:           "document-outline",
+};
+
 type IoniconName = React.ComponentProps<typeof Ionicons>["name"];
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-AU", {
     day: "numeric", month: "short", year: "numeric",
   });
+}
+
+function certStatus(cert: Certificate): { label: string; color: string } {
+  if (cert.revoked_at) return { label: "Revoked", color: colors.danger };
+  if (cert.expires_at && new Date(cert.expires_at) < new Date()) return { label: "Expired", color: colors.warning };
+  return { label: "Active", color: colors.success };
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -97,7 +144,7 @@ function InfoRow({ label, value, icon }: { label: string; value: string; icon: I
 export default function HRScreen() {
   const { user } = useAuth();
 
-  // Data state
+  // Core data
   const [profile,    setProfile]    = useState<UserProfile | null>(null);
   const [membership, setMembership] = useState<Membership | null>(null);
   const [employee,   setEmployee]   = useState<EmployeeRecord | null>(null);
@@ -105,60 +152,43 @@ export default function HRScreen() {
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
 
-  // Leave request form state
+  // Leave form
   const [showRequest,   setShowRequest]   = useState(false);
   const [leaveType,     setLeaveType]     = useState<string>("annual");
   const [leaveReason,   setLeaveReason]   = useState("");
   const [submitting,    setSubmitting]    = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
 
+  // Certificates
+  const [certificates,   setCertificates]   = useState<Certificate[]>([]);
+  const [certsLoading,   setCertsLoading]   = useState(true);
+
+  // Policies
+  const [policyAssignments, setPolicyAssignments] = useState<PolicyAssignment[]>([]);
+  const [policyAcks,        setPolicyAcks]        = useState<PolicyAck[]>([]);
+  const [policiesLoading,   setPoliciesLoading]   = useState(true);
+  const [acknowledging,     setAcknowledging]     = useState<string | null>(null);
+
   const load = useCallback(async () => {
     if (!user?.id) return;
     setLoading(true);
     setError(null);
     try {
-      // 1 — Own user record (lms_users: id = auth.uid() via RLS)
-      const { data: userData, error: userErr } = await supabase
-        .from("lms_users")
-        .select("full_name, email, phone, timezone, created_at")
-        .eq("id", user.id)
-        .maybeSingle();
-      if (userErr) throw userErr;
-      setProfile(userData as UserProfile | null);
+      const [userRes, memRes, empRes, leaveRes] = await Promise.all([
+        supabase.from("lms_users").select("full_name, email, phone, timezone, created_at").eq("id", user.id).maybeSingle(),
+        supabase.from("memberships").select("company_id, role, status, joined_at").eq("user_id", user.id).eq("status", "active").is("deleted_at", null).order("joined_at", { ascending: true }).limit(1).maybeSingle(),
+        supabase.from("hr_employees").select("job_title, department, employment_type, start_date").eq("user_id", user.id).is("deleted_at", null).maybeSingle(),
+        supabase.from("hr_leave_requests").select("id, leave_type, start_date, end_date, days, reason, status, created_at").eq("user_id", user.id).is("deleted_at", null).order("created_at", { ascending: false }),
+      ]);
 
-      // 2 — Membership: own row via user_id = auth.uid()
-      const { data: memData, error: memErr } = await supabase
-        .from("memberships")
-        .select("company_id, role, status, joined_at")
-        .eq("user_id", user.id)
-        .eq("status", "active")
-        .is("deleted_at", null)
-        .order("joined_at", { ascending: true })
-        .limit(1)
-        .maybeSingle();
-      if (memErr) throw memErr;
-      setMembership(memData as Membership | null);
+      if (userRes.error)  throw userRes.error;
+      if (memRes.error)   throw memRes.error;
+      if (leaveRes.error) throw leaveRes.error;
 
-      // 3 — hr_employees record (RLS only allows admin/trainer — worker gets null,
-      //     which is expected; show clean empty state)
-      const { data: empData } = await supabase
-        .from("hr_employees")
-        .select("job_title, department, employment_type, start_date")
-        .eq("user_id", user.id)
-        .is("deleted_at", null)
-        .maybeSingle();
-      setEmployee(empData as EmployeeRecord | null);
-
-      // 4 — Own leave requests (hr_leave_employee policy: user_id = auth.uid())
-      const { data: leaveData, error: leaveErr } = await supabase
-        .from("hr_leave_requests")
-        .select("id, leave_type, start_date, end_date, days, reason, status, created_at")
-        .eq("user_id", user.id)
-        .is("deleted_at", null)
-        .order("created_at", { ascending: false });
-      if (leaveErr) throw leaveErr;
-      setLeaveReqs((leaveData ?? []) as LeaveRequest[]);
-
+      setProfile(userRes.data as UserProfile | null);
+      setMembership(memRes.data as Membership | null);
+      setEmployee(empRes.data as EmployeeRecord | null);
+      setLeaveReqs((leaveRes.data ?? []) as LeaveRequest[]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load HR data.");
     } finally {
@@ -166,9 +196,52 @@ export default function HRScreen() {
     }
   }, [user?.id]);
 
-  useEffect(() => { load(); }, [load]);
+  const loadCertificates = useCallback(async () => {
+    if (!user?.id) return;
+    setCertsLoading(true);
+    try {
+      const { data } = await supabase
+        .from("lms_certificates")
+        .select("id, certificate_number, issued_at, expires_at, revoked_at, lms_courses(title)")
+        .eq("user_id", user.id)
+        .is("deleted_at", null)
+        .order("issued_at", { ascending: false });
+      setCertificates((data ?? []) as unknown as Certificate[]);
+    } finally {
+      setCertsLoading(false);
+    }
+  }, [user?.id]);
 
-  // Submit leave request
+  const loadPolicies = useCallback(async () => {
+    if (!user?.id) return;
+    setPoliciesLoading(true);
+    try {
+      const [assignRes, ackRes] = await Promise.all([
+        supabase
+          .from("hr_policy_assignments")
+          .select("id, policy_id, due_date, hr_policies(id, title, category, version, requires_acknowledgement, effective_date, deleted_at, archived_at)")
+          .eq("user_id", user.id),
+        supabase
+          .from("hr_policy_acknowledgements")
+          .select("policy_id, policy_version, acknowledged_at")
+          .eq("user_id", user.id),
+      ]);
+      // Filter out deleted/archived policies
+      const assignments = ((assignRes.data ?? []) as unknown as PolicyAssignment[]).filter(
+        a => a.hr_policies && !a.hr_policies.deleted_at && !a.hr_policies.archived_at
+      );
+      setPolicyAssignments(assignments as unknown as PolicyAssignment[]);
+      setPolicyAcks((ackRes.data ?? []) as PolicyAck[]);
+    } finally {
+      setPoliciesLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => { load(); },             [load]);
+  useEffect(() => { loadCertificates(); }, [loadCertificates]);
+  useEffect(() => { loadPolicies(); },     [loadPolicies]);
+
+  // ── Submit leave request ───────────────────────────────────────
   async function submitLeaveRequest() {
     if (!user?.id || !membership?.company_id) {
       Alert.alert("Error", "Could not determine your company. Please try again.");
@@ -193,11 +266,9 @@ export default function HRScreen() {
           status:     "pending",
         });
       if (insertErr) throw insertErr;
-
       setSubmitSuccess(true);
       setLeaveReason("");
       setShowRequest(false);
-      // Reload leave list
       const { data } = await supabase
         .from("hr_leave_requests")
         .select("id, leave_type, start_date, end_date, days, reason, status, created_at")
@@ -213,15 +284,47 @@ export default function HRScreen() {
     }
   }
 
-  // ── Derived display values ─────────────────────────────────────
+  // ── Acknowledge policy ─────────────────────────────────────────
+  async function acknowledgePolicy(assignment: PolicyAssignment) {
+    if (!user?.id || !membership?.company_id || !assignment.hr_policies) return;
+    const policy = assignment.hr_policies;
+    setAcknowledging(assignment.id);
+    try {
+      const { error: insertErr } = await supabase
+        .from("hr_policy_acknowledgements")
+        .insert({
+          policy_id:      policy.id,
+          company_id:     membership.company_id,
+          user_id:        user.id,
+          policy_version: policy.version,
+        });
+      // Ignore unique violation (already acknowledged)
+      if (insertErr && insertErr.code !== "23505") throw insertErr;
+      // Refresh acks
+      const { data } = await supabase
+        .from("hr_policy_acknowledgements")
+        .select("policy_id, policy_version, acknowledged_at")
+        .eq("user_id", user.id);
+      setPolicyAcks((data ?? []) as PolicyAck[]);
+    } catch (e) {
+      Alert.alert("Error", e instanceof Error ? e.message : "Could not acknowledge policy.");
+    } finally {
+      setAcknowledging(null);
+    }
+  }
+
+  // ── Derived values ─────────────────────────────────────────────
 
   const displayName  = profile?.full_name ?? user?.user_metadata?.full_name ?? user?.email?.split("@")[0] ?? "Employee";
   const displayEmail = profile?.email ?? user?.email ?? "—";
   const initials     = displayName.trim().split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase();
-  const roleLabel    = membership?.role === "admin" ? "Admin"
-                     : membership?.role === "trainer" ? "Trainer"
-                     : "Employee";
+  const roleLabel    = membership?.role === "admin" ? "Admin" : membership?.role === "trainer" ? "Trainer" : "Employee";
   const memberSince  = membership?.joined_at ?? profile?.created_at;
+
+  const ackSet = new Set(policyAcks.map(a => `${a.policy_id}:${a.policy_version}`));
+  const pendingPolicies = policyAssignments.filter(
+    a => a.hr_policies?.requires_acknowledgement && !ackSet.has(`${a.hr_policies.id}:${a.hr_policies.version}`)
+  );
 
   // ── Loading state ──────────────────────────────────────────────
 
@@ -235,8 +338,6 @@ export default function HRScreen() {
       </SafeAreaView>
     );
   }
-
-  // ── Error state ────────────────────────────────────────────────
 
   if (error) {
     return (
@@ -274,6 +375,16 @@ export default function HRScreen() {
           </View>
         )}
 
+        {/* ── Pending policy alert ─────────────────────────────────── */}
+        {pendingPolicies.length > 0 && (
+          <View style={styles.policyAlert}>
+            <Ionicons name="document-text-outline" size={16} color={colors.warning} />
+            <Text style={styles.policyAlertText}>
+              {pendingPolicies.length} polic{pendingPolicies.length !== 1 ? "ies require" : "y requires"} your acknowledgement
+            </Text>
+          </View>
+        )}
+
         {/* ── Profile card ─────────────────────────────────────────── */}
         <View style={styles.profileCard}>
           <View style={styles.profileTop}>
@@ -292,40 +403,39 @@ export default function HRScreen() {
           )}
         </View>
 
-        {/* ── My details (from lms_users + membership) ─────────────── */}
+        {/* ── My details ───────────────────────────────────────────── */}
         <Text style={styles.sectionTitle}>My details</Text>
         <View style={styles.detailsCard}>
-          <InfoRow label="Full name"   value={displayName}                                         icon="person-outline"        />
-          <InfoRow label="Email"       value={displayEmail}                                        icon="mail-outline"          />
-          <InfoRow label="Role"        value={roleLabel}                                           icon="shield-checkmark-outline" />
+          <InfoRow label="Full name"    value={displayName}  icon="person-outline"            />
+          <InfoRow label="Email"        value={displayEmail} icon="mail-outline"              />
+          <InfoRow label="Role"         value={roleLabel}    icon="shield-checkmark-outline"  />
           {profile?.phone && (
-            <InfoRow label="Phone"     value={profile.phone}                                       icon="call-outline"          />
+            <InfoRow label="Phone"     value={profile.phone}                                   icon="call-outline"    />
           )}
           {profile?.timezone && profile.timezone !== "UTC" && (
-            <InfoRow label="Timezone"  value={profile.timezone}                                    icon="globe-outline"         />
+            <InfoRow label="Timezone"  value={profile.timezone}                                icon="globe-outline"   />
           )}
           {memberSince && (
-            <InfoRow label="Member since" value={formatDate(memberSince)}                          icon="calendar-outline"      />
+            <InfoRow label="Member since" value={formatDate(memberSince)}                      icon="calendar-outline" />
           )}
         </View>
 
-        {/* ── Employment details (from hr_employees) ───────────────── */}
+        {/* ── Employment ───────────────────────────────────────────── */}
         <Text style={styles.sectionTitle}>Employment</Text>
         {employee ? (
           <View style={styles.detailsCard}>
             {employee.job_title && (
-              <InfoRow label="Job title"       value={employee.job_title}                          icon="briefcase-outline"     />
+              <InfoRow label="Job title"       value={employee.job_title}  icon="briefcase-outline" />
             )}
             {employee.department && (
-              <InfoRow label="Department"      value={employee.department}                         icon="business-outline"      />
+              <InfoRow label="Department"      value={employee.department} icon="business-outline"  />
             )}
             {employee.employment_type && (
               <InfoRow label="Employment type" value={EMPLOYMENT_TYPE_LABELS[employee.employment_type] ?? employee.employment_type} icon="layers-outline" />
             )}
             {employee.start_date && (
-              <InfoRow label="Start date"      value={formatDate(employee.start_date)}             icon="calendar-outline"      />
+              <InfoRow label="Start date"      value={formatDate(employee.start_date)} icon="calendar-outline" />
             )}
-            {/* If record exists but all fields null */}
             {!employee.job_title && !employee.department && !employee.employment_type && !employee.start_date && (
               <View style={styles.emptyInCard}>
                 <Text style={styles.emptyInCardText}>Employment details not yet filled in by your admin.</Text>
@@ -342,7 +452,7 @@ export default function HRScreen() {
           </View>
         )}
 
-        {/* ── Leave requests ────────────────────────────────────────── */}
+        {/* ── Leave ────────────────────────────────────────────────── */}
         <View style={styles.sectionRow}>
           <Text style={styles.sectionTitle}>Leave</Text>
           {leaveReqs.length > 0 && (
@@ -350,7 +460,6 @@ export default function HRScreen() {
           )}
         </View>
 
-        {/* Leave list */}
         {leaveReqs.length > 0 && (
           <View style={styles.leaveList}>
             {leaveReqs.map((req, idx) => {
@@ -359,17 +468,13 @@ export default function HRScreen() {
               return (
                 <View key={req.id} style={[styles.leaveRow, !isLast && styles.leaveRowBorder]}>
                   <View style={styles.leaveRowLeft}>
-                    <Text style={styles.leaveType}>
-                      {LEAVE_TYPE_LABELS[req.leave_type] ?? req.leave_type}
-                    </Text>
+                    <Text style={styles.leaveType}>{LEAVE_TYPE_LABELS[req.leave_type] ?? req.leave_type}</Text>
                     <Text style={styles.leaveDates}>
                       {formatDate(req.start_date)}
                       {req.start_date !== req.end_date ? ` – ${formatDate(req.end_date)}` : ""}
                       {" · "}{req.days} day{req.days !== 1 ? "s" : ""}
                     </Text>
-                    {req.reason && (
-                      <Text style={styles.leaveReason} numberOfLines={1}>{req.reason}</Text>
-                    )}
+                    {req.reason && <Text style={styles.leaveReason} numberOfLines={1}>{req.reason}</Text>}
                   </View>
                   <View style={[styles.statusBadge, { backgroundColor: meta.color + "18" }]}>
                     <View style={[styles.statusDot, { backgroundColor: meta.color }]} />
@@ -381,7 +486,6 @@ export default function HRScreen() {
           </View>
         )}
 
-        {/* Request leave toggle button */}
         <TouchableOpacity
           style={[styles.requestBtn, showRequest && styles.requestBtnCancel]}
           onPress={() => { setShowRequest(v => !v); setLeaveReason(""); setLeaveType("annual"); }}
@@ -397,12 +501,9 @@ export default function HRScreen() {
           </Text>
         </TouchableOpacity>
 
-        {/* Leave request form */}
         {showRequest && (
           <View style={styles.requestForm}>
             <Text style={styles.formTitle}>New leave request</Text>
-
-            {/* Leave type chips */}
             <Text style={styles.formLabel}>Leave type</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: spacing.md }}>
               {(["annual", "sick", "personal", "unpaid"] as const).map(t => (
@@ -417,8 +518,6 @@ export default function HRScreen() {
                 </TouchableOpacity>
               ))}
             </ScrollView>
-
-            {/* Reason input */}
             <Text style={styles.formLabel}>Reason</Text>
             <TextInput
               style={styles.reasonInput}
@@ -430,14 +529,10 @@ export default function HRScreen() {
               numberOfLines={3}
               textAlignVertical="top"
             />
-
             <View style={styles.formNote}>
               <Ionicons name="information-circle-outline" size={14} color={colors.textSecondary} />
-              <Text style={styles.formNoteText}>
-                Exact dates can be set by your manager when they review the request.
-              </Text>
+              <Text style={styles.formNoteText}>Exact dates can be set by your manager when they review the request.</Text>
             </View>
-
             <TouchableOpacity
               style={[styles.submitBtn, submitting && { opacity: 0.6 }]}
               onPress={submitLeaveRequest}
@@ -456,7 +551,6 @@ export default function HRScreen() {
           </View>
         )}
 
-        {/* Empty leave state (no requests yet + form not open) */}
         {leaveReqs.length === 0 && !showRequest && (
           <View style={styles.emptyCard}>
             <Ionicons name="calendar-outline" size={24} color={colors.textMuted} />
@@ -467,20 +561,126 @@ export default function HRScreen() {
           </View>
         )}
 
-        {/* ── Documents ─────────────────────────────────────────────── */}
-        <Text style={styles.sectionTitle}>My documents</Text>
-        {/* hr_documents is linked to hr_employees.id (admin-managed).
-            Learner RLS does not expose these — show a clear info state. */}
-        <View style={styles.emptyCard}>
-          <Ionicons name="document-text-outline" size={24} color={colors.textMuted} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.emptyCardTitle}>Documents managed by admin</Text>
-            <Text style={styles.emptyCardBody}>
-              Your employment contracts and certificates are managed by your HR admin.
-              Contact them to access your documents.
-            </Text>
-          </View>
+        {/* ── Certificates ─────────────────────────────────────────── */}
+        <View style={styles.sectionRow}>
+          <Text style={styles.sectionTitle}>My Certificates</Text>
+          {certificates.length > 0 && (
+            <Text style={styles.sectionCount}>{certificates.length} issued</Text>
+          )}
         </View>
+
+        {certsLoading ? (
+          <View style={styles.loadingRow}>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text style={styles.loadingRowText}>Loading certificates…</Text>
+          </View>
+        ) : certificates.length > 0 ? (
+          <View style={styles.certList}>
+            {certificates.map((cert, idx) => {
+              const status  = certStatus(cert);
+              const isLast  = idx === certificates.length - 1;
+              const title   = (cert.lms_courses as any)?.title ?? "Certificate";
+              return (
+                <View key={cert.id} style={[styles.certRow, !isLast && styles.certRowBorder]}>
+                  <View style={[styles.certIconWrap, { backgroundColor: status.color + "14" }]}>
+                    <Ionicons name="ribbon-outline" size={18} color={status.color} />
+                  </View>
+                  <View style={styles.certContent}>
+                    <Text style={styles.certTitle} numberOfLines={1}>{title}</Text>
+                    <Text style={styles.certMeta}>
+                      Issued {formatDate(cert.issued_at)}
+                      {cert.expires_at ? ` · Expires ${formatDate(cert.expires_at)}` : ""}
+                    </Text>
+                    <Text style={styles.certNumber} numberOfLines={1}>{cert.certificate_number}</Text>
+                  </View>
+                  <View style={[styles.certBadge, { backgroundColor: status.color + "18" }]}>
+                    <Text style={[styles.certBadgeText, { color: status.color }]}>{status.label}</Text>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : (
+          <View style={styles.emptyCard}>
+            <Ionicons name="ribbon-outline" size={24} color={colors.textMuted} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.emptyCardTitle}>No certificates yet</Text>
+              <Text style={styles.emptyCardBody}>Complete training courses to earn certificates.</Text>
+            </View>
+          </View>
+        )}
+
+        {/* ── Policies ─────────────────────────────────────────────── */}
+        <View style={styles.sectionRow}>
+          <Text style={styles.sectionTitle}>Workplace Policies</Text>
+          {pendingPolicies.length > 0 && (
+            <Text style={[styles.sectionCount, { color: colors.warning }]}>
+              {pendingPolicies.length} pending
+            </Text>
+          )}
+        </View>
+
+        {policiesLoading ? (
+          <View style={styles.loadingRow}>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text style={styles.loadingRowText}>Loading policies…</Text>
+          </View>
+        ) : policyAssignments.length > 0 ? (
+          <View style={styles.policyList}>
+            {policyAssignments.map((assignment, idx) => {
+              const policy     = assignment.hr_policies!;
+              const isAcked    = ackSet.has(`${policy.id}:${policy.version}`);
+              const isLast     = idx === policyAssignments.length - 1;
+              const catIcon    = CERT_CATEGORY_ICONS[policy.category] ?? "document-outline";
+              const isLoading  = acknowledging === assignment.id;
+              return (
+                <View key={assignment.id} style={[styles.policyRow, !isLast && styles.policyRowBorder]}>
+                  <View style={[styles.policyIconWrap, { backgroundColor: isAcked ? colors.successLight : colors.warningLight }]}>
+                    <Ionicons name={catIcon} size={16} color={isAcked ? colors.success : colors.warning} />
+                  </View>
+                  <View style={styles.policyContent}>
+                    <Text style={styles.policyTitle} numberOfLines={1}>{policy.title}</Text>
+                    <Text style={styles.policyMeta}>
+                      v{policy.version}
+                      {policy.effective_date ? ` · Effective ${formatDate(policy.effective_date)}` : ""}
+                      {assignment.due_date ? ` · Due ${formatDate(assignment.due_date)}` : ""}
+                    </Text>
+                    {isAcked ? (
+                      <View style={styles.ackedRow}>
+                        <Ionicons name="checkmark-circle" size={12} color={colors.success} />
+                        <Text style={styles.ackedText}>Acknowledged</Text>
+                      </View>
+                    ) : policy.requires_acknowledgement ? (
+                      <TouchableOpacity
+                        style={[styles.ackBtn, isLoading && { opacity: 0.6 }]}
+                        onPress={() => acknowledgePolicy(assignment)}
+                        activeOpacity={0.82}
+                        disabled={isLoading}
+                      >
+                        {isLoading ? (
+                          <ActivityIndicator size="small" color={colors.white} />
+                        ) : (
+                          <>
+                            <Ionicons name="checkmark-outline" size={12} color={colors.white} />
+                            <Text style={styles.ackBtnText}>I acknowledge this policy</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : (
+          <View style={[styles.emptyCard, { marginBottom: spacing.xxl }]}>
+            <Ionicons name="document-text-outline" size={24} color={colors.textMuted} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.emptyCardTitle}>No policies assigned</Text>
+              <Text style={styles.emptyCardBody}>Your HR admin will assign workplace policies here.</Text>
+            </View>
+          </View>
+        )}
 
       </ScrollView>
     </SafeAreaView>
@@ -507,9 +707,11 @@ const styles = StyleSheet.create({
   pageTitle:  { fontSize: font.sizes.xl, fontWeight: "800", color: colors.text },
   pageSub:    { fontSize: font.sizes.sm, color: colors.textSecondary, marginTop: 2 },
 
-  // Success banner
+  // Banners
   successBanner:     { flexDirection: "row", alignItems: "center", gap: spacing.xs, backgroundColor: colors.successLight, borderRadius: radius.md, padding: spacing.sm, marginBottom: spacing.md, borderWidth: 1, borderColor: colors.success + "30" },
   successBannerText: { flex: 1, fontSize: font.sizes.sm, color: colors.success, fontWeight: "600", lineHeight: 18 },
+  policyAlert:       { flexDirection: "row", alignItems: "center", gap: spacing.xs, backgroundColor: colors.warningLight, borderRadius: radius.md, padding: spacing.sm, marginBottom: spacing.md, borderWidth: 1, borderColor: colors.warning + "40" },
+  policyAlertText:   { flex: 1, fontSize: font.sizes.sm, color: colors.warning, fontWeight: "600" },
 
   // Profile card
   profileCard:      { backgroundColor: colors.primary, borderRadius: radius.xxl, padding: spacing.lg, marginBottom: spacing.lg, ...shadow.button },
@@ -539,10 +741,14 @@ const styles = StyleSheet.create({
   emptyInCard:     { paddingVertical: spacing.md },
   emptyInCardText: { fontSize: font.sizes.sm, color: colors.textMuted, textAlign: "center" },
 
-  // Empty card (horizontal row layout)
+  // Empty card
   emptyCard:      { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm, backgroundColor: colors.card, borderRadius: radius.xl, padding: spacing.md, marginBottom: spacing.md, ...shadow.card, borderWidth: 1, borderColor: colors.borderLight },
   emptyCardTitle: { fontSize: font.sizes.sm, fontWeight: "700", color: colors.text, marginBottom: 2 },
   emptyCardBody:  { fontSize: font.sizes.xs, color: colors.textMuted, lineHeight: 17 },
+
+  // Loading row
+  loadingRow:     { flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.card, borderRadius: radius.xl, marginBottom: spacing.md, ...shadow.card },
+  loadingRowText: { fontSize: font.sizes.sm, color: colors.textSecondary },
 
   // Leave list
   leaveList:      { backgroundColor: colors.card, borderRadius: radius.xl, paddingHorizontal: spacing.md, ...shadow.card, marginBottom: spacing.sm },
@@ -556,13 +762,11 @@ const styles = StyleSheet.create({
   statusDot:      { width: 5, height: 5, borderRadius: 3 },
   statusBadgeText: { fontSize: 10, fontWeight: "700" },
 
-  // Request button
+  // Request button + form
   requestBtn:           { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, backgroundColor: colors.primaryLight, borderRadius: radius.lg, paddingVertical: 14, marginBottom: spacing.sm },
   requestBtnCancel:     { backgroundColor: colors.dangerLight },
   requestBtnText:       { fontSize: font.sizes.base, fontWeight: "700", color: colors.primary },
   requestBtnTextCancel: { color: colors.danger },
-
-  // Request form
   requestForm:    { backgroundColor: colors.card, borderRadius: radius.xl, padding: spacing.md, marginBottom: spacing.lg, ...shadow.card },
   formTitle:      { fontSize: font.sizes.md, fontWeight: "700", color: colors.text, marginBottom: spacing.sm },
   formLabel:      { fontSize: font.sizes.sm, fontWeight: "600", color: colors.text, marginBottom: spacing.xs },
@@ -575,4 +779,29 @@ const styles = StyleSheet.create({
   formNoteText:   { flex: 1, fontSize: font.sizes.xs, color: colors.textSecondary, lineHeight: 17 },
   submitBtn:      { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 14, ...shadow.button },
   submitBtnText:  { fontSize: font.sizes.sm, fontWeight: "700", color: colors.white },
+
+  // Certificates
+  certList:      { backgroundColor: colors.card, borderRadius: radius.xl, paddingHorizontal: spacing.md, marginBottom: spacing.lg, ...shadow.card },
+  certRow:       { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 14 },
+  certRowBorder: { borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  certIconWrap:  { width: 38, height: 38, borderRadius: radius.md, alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  certContent:   { flex: 1 },
+  certTitle:     { fontSize: font.sizes.sm, fontWeight: "700", color: colors.text },
+  certMeta:      { fontSize: font.sizes.xs, color: colors.textSecondary, marginTop: 2 },
+  certNumber:    { fontSize: 10, color: colors.textMuted, marginTop: 2, fontFamily: "monospace" },
+  certBadge:     { paddingHorizontal: 9, paddingVertical: 4, borderRadius: radius.full, flexShrink: 0 },
+  certBadgeText: { fontSize: 10, fontWeight: "700" },
+
+  // Policies
+  policyList:      { backgroundColor: colors.card, borderRadius: radius.xl, paddingHorizontal: spacing.md, marginBottom: spacing.lg, ...shadow.card },
+  policyRow:       { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm, paddingVertical: 14 },
+  policyRowBorder: { borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  policyIconWrap:  { width: 36, height: 36, borderRadius: radius.md, alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 },
+  policyContent:   { flex: 1 },
+  policyTitle:     { fontSize: font.sizes.sm, fontWeight: "700", color: colors.text, marginBottom: 2 },
+  policyMeta:      { fontSize: font.sizes.xs, color: colors.textSecondary, marginBottom: spacing.xs },
+  ackedRow:        { flexDirection: "row", alignItems: "center", gap: 4 },
+  ackedText:       { fontSize: font.sizes.xs, fontWeight: "600", color: colors.success },
+  ackBtn:          { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: colors.primary, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: 7, alignSelf: "flex-start" },
+  ackBtnText:      { fontSize: font.sizes.xs, fontWeight: "700", color: colors.white },
 });

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons }     from "@expo/vector-icons";
@@ -12,6 +12,7 @@ import { colors, spacing, radius, font, shadow } from "../lib/theme";
 
 interface Shift {
   id:         string;
+  company_id: string;
   shift_date: string;
   start_time: string;
   end_time:   string;
@@ -19,6 +20,24 @@ interface Shift {
   location:   string | null;
   status:     string;
   notes:      string | null;
+}
+
+interface AttendanceRecord {
+  id:                string;
+  attendance_status: "not_started" | "in_progress" | "on_break" | "completed";
+  clock_in_at:       string | null;
+  clock_out_at:      string | null;
+  worked_minutes:    number | null;
+  created_at:        string;
+}
+
+interface AttendanceHistoryItem {
+  id:                string;
+  attendance_status: string;
+  clock_in_at:       string | null;
+  clock_out_at:      string | null;
+  worked_minutes:    number | null;
+  hr_roster_shifts:  { shift_date: string; start_time: string; end_time: string } | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -54,21 +73,64 @@ function dayLabel(iso: string): string {
   return `${Math.abs(diff)} days ago`;
 }
 
+function formatElapsed(startIso: string): string {
+  const mins = Math.floor((Date.now() - new Date(startIso).getTime()) / 60000);
+  if (mins < 1) return "< 1m";
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function formatWorkedMinutes(mins: number): string {
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 const STATUS_META: Record<string, { color: string; label: string }> = {
   published: { color: colors.success,  label: "Confirmed" },
   draft:     { color: colors.warning,  label: "Pending"   },
   cancelled: { color: colors.danger,   label: "Cancelled" },
 };
 
+const ATTENDANCE_STATUS_META: Record<string, { color: string; label: string; icon: React.ComponentProps<typeof Ionicons>["name"] }> = {
+  not_started: { color: colors.textMuted,  label: "Not started", icon: "time-outline"              },
+  in_progress: { color: colors.primary,    label: "Clocked in",  icon: "radio-button-on-outline"   },
+  on_break:    { color: colors.warning,    label: "On break",    icon: "cafe-outline"              },
+  completed:   { color: colors.success,    label: "Completed",   icon: "checkmark-circle-outline"  },
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ShiftsScreen() {
-  const { user }   = useAuth();
+  const { user } = useAuth();
+
+  // Shift list state
   const [shifts,   setShifts]   = useState<Shift[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
   const [selected, setSelected] = useState<number>(0);
 
+  // Clock in/out state
+  const [todayShift,    setTodayShift]    = useState<Shift | null>(null);
+  const [attendance,    setAttendance]    = useState<AttendanceRecord | null>(null);
+  const [clockLoading,  setClockLoading]  = useState(false);
+  const [, setTick] = useState(0); // force re-render for elapsed timer
+
+  // Attendance history
+  const [attendanceHistory,      setAttendanceHistory]      = useState<AttendanceHistoryItem[]>([]);
+  const [attendanceHistoryLoading, setAttendanceHistoryLoading] = useState(false);
+
+  // ── Timer for elapsed display ──────────────────────────────────
+  useEffect(() => {
+    if (attendance?.attendance_status !== "in_progress") return;
+    const interval = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(interval);
+  }, [attendance?.attendance_status]);
+
+  // ── Load shifts ───────────────────────────────────────────────
   const load = useCallback(async () => {
     if (!user?.id) return;
     setLoading(true);
@@ -79,7 +141,7 @@ export default function ShiftsScreen() {
 
       const { data, error: qErr } = await supabase
         .from("hr_roster_shifts")
-        .select("id, shift_date, start_time, end_time, role_label, location, status, notes")
+        .select("id, company_id, shift_date, start_time, end_time, role_label, location, status, notes")
         .eq("user_id", user.id)
         .is("deleted_at", null)
         .gte("shift_date", from)
@@ -87,10 +149,21 @@ export default function ShiftsScreen() {
         .order("shift_date", { ascending: true });
 
       if (qErr) throw qErr;
-      setShifts((data ?? []) as Shift[]);
+      const rows = (data ?? []) as Shift[];
+      setShifts(rows);
+
       const todayStr    = new Date().toISOString().slice(0, 10);
-      const upcomingIdx = (data ?? []).findIndex((s: any) => s.shift_date >= todayStr);
+      const upcomingIdx = rows.findIndex((s) => s.shift_date >= todayStr);
       setSelected(upcomingIdx >= 0 ? upcomingIdx : 0);
+
+      // Find today's shift for clock in/out
+      const todayShiftData = rows.find(s => s.shift_date === todayStr) ?? null;
+      setTodayShift(todayShiftData);
+      if (todayShiftData) {
+        loadAttendance(todayShiftData.id);
+      } else {
+        setAttendance(null);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load shifts.");
     } finally {
@@ -98,18 +171,111 @@ export default function ShiftsScreen() {
     }
   }, [user?.id]);
 
+  // ── Load today's attendance ───────────────────────────────────
+  async function loadAttendance(shiftId: string) {
+    if (!user?.id) return;
+    const { data } = await supabase
+      .from("hr_attendance")
+      .select("id, attendance_status, clock_in_at, clock_out_at, worked_minutes, created_at")
+      .eq("shift_id", shiftId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    setAttendance((data ?? null) as AttendanceRecord | null);
+  }
+
+  // ── Load attendance history ───────────────────────────────────
+  const loadAttendanceHistory = useCallback(async () => {
+    if (!user?.id) return;
+    setAttendanceHistoryLoading(true);
+    try {
+      const { data } = await supabase
+        .from("hr_attendance")
+        .select("id, attendance_status, clock_in_at, clock_out_at, worked_minutes, hr_roster_shifts(shift_date, start_time, end_time)")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(7);
+      setAttendanceHistory((data ?? []) as unknown as AttendanceHistoryItem[]);
+    } finally {
+      setAttendanceHistoryLoading(false);
+    }
+  }, [user?.id]);
+
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadAttendanceHistory(); }, [loadAttendanceHistory]);
+
+  // ── Clock In ──────────────────────────────────────────────────
+  async function clockIn() {
+    if (!user?.id || !todayShift) return;
+    setClockLoading(true);
+    try {
+      const { data, error: insertErr } = await supabase
+        .from("hr_attendance")
+        .insert({
+          company_id:        todayShift.company_id,
+          shift_id:          todayShift.id,
+          user_id:           user.id,
+          attendance_status: "in_progress",
+          clock_in_at:       new Date().toISOString(),
+        })
+        .select("id, attendance_status, clock_in_at, clock_out_at, worked_minutes, created_at")
+        .single();
+
+      if (insertErr) throw insertErr;
+      setAttendance(data as AttendanceRecord);
+      loadAttendanceHistory();
+    } catch (e: any) {
+      if (e?.code === "23505") {
+        // Already clocked in — reload
+        loadAttendance(todayShift.id);
+      } else {
+        Alert.alert("Clock In Failed", e instanceof Error ? e.message : "Could not clock in. Please try again.");
+      }
+    } finally {
+      setClockLoading(false);
+    }
+  }
+
+  // ── Clock Out ─────────────────────────────────────────────────
+  async function clockOut() {
+    if (!attendance?.clock_in_at || !user?.id) return;
+    const workedMins = Math.max(
+      0,
+      Math.floor((Date.now() - new Date(attendance.clock_in_at).getTime()) / 60000)
+    );
+    setClockLoading(true);
+    try {
+      const { data, error: updateErr } = await supabase
+        .from("hr_attendance")
+        .update({
+          attendance_status: "completed",
+          clock_out_at:      new Date().toISOString(),
+          worked_minutes:    workedMins,
+        })
+        .eq("id", attendance.id)
+        .eq("user_id", user.id)
+        .select("id, attendance_status, clock_in_at, clock_out_at, worked_minutes, created_at")
+        .single();
+
+      if (updateErr) throw updateErr;
+      setAttendance(data as AttendanceRecord);
+      loadAttendanceHistory();
+    } catch (e) {
+      Alert.alert("Clock Out Failed", e instanceof Error ? e.message : "Could not clock out. Please try again.");
+    } finally {
+      setClockLoading(false);
+    }
+  }
 
   const todayStr   = new Date().toISOString().slice(0, 10);
   const upcoming   = shifts.filter(s => s.shift_date >= todayStr);
   const totalHours = upcoming.reduce((acc, s) => acc + durationHours(s.start_time, s.end_time), 0);
-  const selected_s = shifts[selected] ?? null;
+  const selectedShift = shifts[selected] ?? null;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView showsVerticalScrollIndicator={false}>
 
-        {/* ── Header ──────────────────────────────────────────────────── */}
+        {/* ── Header ────────────────────────────────────────────── */}
         <View style={styles.header}>
           <View>
             <Text style={styles.pageTitle}>My Shifts</Text>
@@ -120,7 +286,7 @@ export default function ShiftsScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* ── Error ───────────────────────────────────────────────────── */}
+        {/* ── Error ─────────────────────────────────────────────── */}
         {error && (
           <TouchableOpacity style={styles.errorBanner} onPress={load}>
             <Ionicons name="alert-circle-outline" size={15} color={colors.danger} />
@@ -128,14 +294,26 @@ export default function ShiftsScreen() {
           </TouchableOpacity>
         )}
 
-        {/* ── Loading ─────────────────────────────────────────────────── */}
+        {/* ── Clock In / Out card ───────────────────────────────── */}
+        {!loading && todayShift && (
+          <ClockCard
+            shift={todayShift}
+            attendance={attendance}
+            loading={clockLoading}
+            onClockIn={clockIn}
+            onClockOut={clockOut}
+          />
+        )}
+
+        {/* ── Loading ───────────────────────────────────────────── */}
         {loading ? (
           <View style={styles.center}>
             <ActivityIndicator size="large" color={colors.primary} />
             <Text style={styles.loadingText}>Loading your shifts…</Text>
           </View>
         ) : shifts.length === 0 ? (
-          /* ── Empty state ────────────────────────────────────────────── */
+
+          /* ── Empty state ────────────────────────────────────── */
           <View style={styles.emptyWrap}>
             <View style={styles.emptyIconWrap}>
               <Ionicons name="calendar-outline" size={32} color={colors.textMuted} />
@@ -147,7 +325,7 @@ export default function ShiftsScreen() {
           </View>
         ) : (
           <>
-            {/* ── Summary stat cards ────────────────────────────────────── */}
+            {/* ── Summary stats ──────────────────────────────────── */}
             <View style={styles.summaryRow}>
               <View style={styles.summaryCard}>
                 <View style={[styles.summaryIconWrap, { backgroundColor: colors.primaryLight }]}>
@@ -167,15 +345,15 @@ export default function ShiftsScreen() {
               </View>
             </View>
 
-            {/* ── Day picker ────────────────────────────────────────────── */}
+            {/* ── Day picker ─────────────────────────────────────── */}
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.dayRow}
             >
               {shifts.map((s, i) => {
-                const active = selected === i;
-                const meta   = STATUS_META[s.status] ?? STATUS_META.published;
+                const active  = selected === i;
+                const meta    = STATUS_META[s.status] ?? STATUS_META.published;
                 const isToday = s.shift_date === todayStr;
                 return (
                   <TouchableOpacity
@@ -184,9 +362,7 @@ export default function ShiftsScreen() {
                     style={[styles.dayBtn, active && styles.dayBtnActive]}
                     activeOpacity={0.8}
                   >
-                    {isToday && !active && (
-                      <View style={styles.todayDot} />
-                    )}
+                    {isToday && !active && <View style={styles.todayDot} />}
                     <Text style={[styles.dayWeekday, active && styles.dayTextActive]}>
                       {new Date(s.shift_date + "T00:00:00").toLocaleDateString("en-AU", { weekday: "short" })}
                     </Text>
@@ -199,61 +375,57 @@ export default function ShiftsScreen() {
               })}
             </ScrollView>
 
-            {/* ── Selected shift detail ─────────────────────────────────── */}
-            {selected_s && (
+            {/* ── Selected shift detail ───────────────────────────── */}
+            {selectedShift && (
               <View style={styles.detailCard}>
                 <View style={styles.detailHeader}>
                   <View>
-                    <Text style={styles.detailDate}>{formatDate(selected_s.shift_date)}</Text>
-                    <Text style={styles.detailDay}>{dayLabel(selected_s.shift_date)}</Text>
+                    <Text style={styles.detailDate}>{formatDate(selectedShift.shift_date)}</Text>
+                    <Text style={styles.detailDay}>{dayLabel(selectedShift.shift_date)}</Text>
                   </View>
                   <View style={[styles.statusBadge, {
-                    backgroundColor: (STATUS_META[selected_s.status]?.color ?? colors.primary) + "18",
+                    backgroundColor: (STATUS_META[selectedShift.status]?.color ?? colors.primary) + "18",
                   }]}>
-                    <View style={[styles.statusDot, { backgroundColor: STATUS_META[selected_s.status]?.color ?? colors.primary }]} />
-                    <Text style={[styles.statusBadgeText, {
-                      color: STATUS_META[selected_s.status]?.color ?? colors.primary,
-                    }]}>
-                      {STATUS_META[selected_s.status]?.label ?? selected_s.status}
+                    <View style={[styles.statusDot, { backgroundColor: STATUS_META[selectedShift.status]?.color ?? colors.primary }]} />
+                    <Text style={[styles.statusBadgeText, { color: STATUS_META[selectedShift.status]?.color ?? colors.primary }]}>
+                      {STATUS_META[selectedShift.status]?.label ?? selectedShift.status}
                     </Text>
                   </View>
                 </View>
 
-                {/* Time block */}
                 <View style={styles.timeBlock}>
                   <View style={styles.timeBlockLeft}>
                     <Ionicons name="time-outline" size={16} color={colors.primary} />
                     <Text style={styles.timeText}>
-                      {formatTime(selected_s.start_time)} – {formatTime(selected_s.end_time)}
+                      {formatTime(selectedShift.start_time)} – {formatTime(selectedShift.end_time)}
                     </Text>
                   </View>
                   <View style={styles.durationBadge}>
                     <Text style={styles.durationText}>
-                      {durationHours(selected_s.start_time, selected_s.end_time)}h
+                      {durationHours(selectedShift.start_time, selectedShift.end_time)}h
                     </Text>
                   </View>
                 </View>
 
-                {/* Detail rows */}
-                {selected_s.role_label && (
-                  <DetailRow icon="briefcase-outline" label="Role" value={selected_s.role_label} />
+                {selectedShift.role_label && (
+                  <DetailRow icon="briefcase-outline" label="Role" value={selectedShift.role_label} />
                 )}
-                {selected_s.location && (
-                  <DetailRow icon="location-outline" label="Location" value={selected_s.location} />
+                {selectedShift.location && (
+                  <DetailRow icon="location-outline" label="Location" value={selectedShift.location} />
                 )}
-                {selected_s.notes && (
-                  <DetailRow icon="document-text-outline" label="Notes" value={selected_s.notes} />
+                {selectedShift.notes && (
+                  <DetailRow icon="document-text-outline" label="Notes" value={selectedShift.notes} />
                 )}
               </View>
             )}
 
-            {/* ── All shifts list ───────────────────────────────────────── */}
+            {/* ── All shifts list ─────────────────────────────────── */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>All scheduled shifts</Text>
               <View style={styles.shiftList}>
                 {shifts.map((s, idx) => {
-                  const meta    = STATUS_META[s.status] ?? STATUS_META.published;
-                  const isLast  = idx === shifts.length - 1;
+                  const meta   = STATUS_META[s.status] ?? STATUS_META.published;
+                  const isLast = idx === shifts.length - 1;
                   return (
                     <TouchableOpacity
                       key={s.id}
@@ -280,12 +452,197 @@ export default function ShiftsScreen() {
             </View>
           </>
         )}
+
+        {/* ── Attendance Summary ───────────────────────────────── */}
+        <AttendanceSummary
+          history={attendanceHistory}
+          loading={attendanceHistoryLoading}
+        />
+
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-// ─── Detail row sub-component ─────────────────────────────────────────────────
+// ─── ClockCard ────────────────────────────────────────────────────────────────
+
+function ClockCard({
+  shift, attendance, loading, onClockIn, onClockOut,
+}: {
+  shift:       Shift;
+  attendance:  AttendanceRecord | null;
+  loading:     boolean;
+  onClockIn:   () => void;
+  onClockOut:  () => void;
+}) {
+  const status  = attendance?.attendance_status ?? "not_started";
+  const meta    = ATTENDANCE_STATUS_META[status] ?? ATTENDANCE_STATUS_META.not_started;
+  const canIn   = status === "not_started";
+  const canOut  = status === "in_progress";
+
+  return (
+    <View style={clockStyles.card}>
+      {/* Top row */}
+      <View style={clockStyles.topRow}>
+        <View style={clockStyles.topLeft}>
+          <View style={[clockStyles.statusDot, { backgroundColor: meta.color }]} />
+          <Text style={[clockStyles.statusLabel, { color: meta.color }]}>{meta.label}</Text>
+        </View>
+        <Text style={clockStyles.shiftTime}>
+          {formatTime(shift.start_time)} – {formatTime(shift.end_time)}
+        </Text>
+      </View>
+
+      <Text style={clockStyles.title}>Today's Shift</Text>
+      {shift.role_label && (
+        <Text style={clockStyles.role}>{shift.role_label}</Text>
+      )}
+
+      {/* Elapsed time (while clocked in) */}
+      {status === "in_progress" && attendance?.clock_in_at && (
+        <View style={clockStyles.elapsedRow}>
+          <Ionicons name="timer-outline" size={14} color={colors.primary} />
+          <Text style={clockStyles.elapsedText}>
+            {formatElapsed(attendance.clock_in_at)} elapsed
+          </Text>
+        </View>
+      )}
+
+      {/* Worked time (after completion) */}
+      {status === "completed" && attendance?.worked_minutes != null && (
+        <View style={clockStyles.elapsedRow}>
+          <Ionicons name="checkmark-circle-outline" size={14} color={colors.success} />
+          <Text style={[clockStyles.elapsedText, { color: colors.success }]}>
+            {formatWorkedMinutes(attendance.worked_minutes)} worked
+          </Text>
+        </View>
+      )}
+
+      {/* Action button */}
+      {(canIn || canOut) && (
+        <TouchableOpacity
+          style={[clockStyles.btn, canOut && clockStyles.btnOut]}
+          onPress={canIn ? onClockIn : onClockOut}
+          activeOpacity={0.85}
+          disabled={loading}
+        >
+          {loading ? (
+            <ActivityIndicator color={colors.white} size="small" />
+          ) : (
+            <>
+              <Ionicons
+                name={canIn ? "log-in-outline" : "log-out-outline"}
+                size={17}
+                color={colors.white}
+              />
+              <Text style={clockStyles.btnText}>
+                {canIn ? "Clock In" : "Clock Out"}
+              </Text>
+            </>
+          )}
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+}
+
+const clockStyles = StyleSheet.create({
+  card:         { marginHorizontal: spacing.md, marginBottom: spacing.md, backgroundColor: colors.card, borderRadius: radius.xxl, padding: spacing.md, ...shadow.md, borderWidth: 1, borderColor: colors.borderLight },
+  topRow:       { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.sm },
+  topLeft:      { flexDirection: "row", alignItems: "center", gap: 6 },
+  statusDot:    { width: 8, height: 8, borderRadius: 4 },
+  statusLabel:  { fontSize: font.sizes.xs, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
+  shiftTime:    { fontSize: font.sizes.xs, color: colors.textSecondary, fontWeight: "600" },
+  title:        { fontSize: font.sizes.md, fontWeight: "800", color: colors.text, marginBottom: 2 },
+  role:         { fontSize: font.sizes.sm, color: colors.textSecondary, marginBottom: spacing.sm },
+  elapsedRow:   { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: spacing.sm, backgroundColor: colors.primaryLight, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: 6, alignSelf: "flex-start" },
+  elapsedText:  { fontSize: font.sizes.sm, fontWeight: "700", color: colors.primary },
+  btn:          { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 14, marginTop: 4, ...shadow.button },
+  btnOut:       { backgroundColor: colors.danger, ...Platform_shadow(colors.danger) },
+  btnText:      { fontSize: font.sizes.base, fontWeight: "700", color: colors.white },
+});
+
+// platform-safe colored shadow helper
+import { Platform } from "react-native";
+function Platform_shadow(color: string) {
+  return Platform.select({
+    web: { boxShadow: `0 4px 14px ${color}55` } as object,
+    default: { shadowColor: color, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.28, shadowRadius: 10, elevation: 5 },
+  });
+}
+
+// ─── AttendanceSummary ────────────────────────────────────────────────────────
+
+function AttendanceSummary({
+  history, loading,
+}: { history: AttendanceHistoryItem[]; loading: boolean }) {
+  if (!loading && history.length === 0) return null;
+
+  return (
+    <View style={attStyles.section}>
+      <Text style={attStyles.sectionTitle}>Attendance Summary</Text>
+
+      {loading ? (
+        <View style={attStyles.loadingRow}>
+          <ActivityIndicator size="small" color={colors.primary} />
+          <Text style={attStyles.loadingText}>Loading attendance…</Text>
+        </View>
+      ) : (
+        <View style={attStyles.list}>
+          {history.map((item, idx) => {
+            const shift   = item.hr_roster_shifts;
+            const meta    = ATTENDANCE_STATUS_META[item.attendance_status] ?? ATTENDANCE_STATUS_META.not_started;
+            const isLast  = idx === history.length - 1;
+            const dateStr = shift ? formatDate(shift.shift_date) : "Unknown date";
+            return (
+              <View key={item.id} style={[attStyles.row, !isLast && attStyles.rowBorder]}>
+                <View style={[attStyles.iconWrap, { backgroundColor: meta.color + "14" }]}>
+                  <Ionicons name={meta.icon} size={15} color={meta.color} />
+                </View>
+                <View style={attStyles.rowContent}>
+                  <Text style={attStyles.rowDate}>{dateStr}</Text>
+                  {shift && (
+                    <Text style={attStyles.rowTime}>
+                      {formatTime(shift.start_time)} – {formatTime(shift.end_time)}
+                    </Text>
+                  )}
+                </View>
+                <View style={attStyles.rowRight}>
+                  {item.worked_minutes != null && item.worked_minutes > 0 ? (
+                    <Text style={attStyles.workedHours}>{formatWorkedMinutes(item.worked_minutes)}</Text>
+                  ) : null}
+                  <View style={[attStyles.statusBadge, { backgroundColor: meta.color + "18" }]}>
+                    <Text style={[attStyles.statusText, { color: meta.color }]}>{meta.label}</Text>
+                  </View>
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      )}
+    </View>
+  );
+}
+
+const attStyles = StyleSheet.create({
+  section:     { paddingHorizontal: spacing.md, marginBottom: spacing.xxl },
+  sectionTitle: { fontSize: font.sizes.base, fontWeight: "700", color: colors.text, marginBottom: spacing.sm },
+  loadingRow:  { flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md },
+  loadingText: { fontSize: font.sizes.sm, color: colors.textSecondary },
+  list:        { backgroundColor: colors.card, borderRadius: radius.xl, paddingHorizontal: spacing.md, ...shadow.card },
+  row:         { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 13 },
+  rowBorder:   { borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+  iconWrap:    { width: 32, height: 32, borderRadius: radius.sm, alignItems: "center", justifyContent: "center" },
+  rowContent:  { flex: 1 },
+  rowDate:     { fontSize: font.sizes.sm, fontWeight: "700", color: colors.text },
+  rowTime:     { fontSize: font.sizes.xs, color: colors.textSecondary, marginTop: 1 },
+  rowRight:    { alignItems: "flex-end", gap: 4 },
+  workedHours: { fontSize: font.sizes.sm, fontWeight: "700", color: colors.text },
+  statusBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.full },
+  statusText:  { fontSize: 10, fontWeight: "700" },
+});
+
+// ─── DetailRow sub-component ──────────────────────────────────────────────────
 
 type IoniconName = React.ComponentProps<typeof Ionicons>["name"];
 
@@ -302,6 +659,7 @@ function DetailRow({ icon, label, value }: { icon: IoniconName; label: string; v
     </View>
   );
 }
+
 const drStyles = StyleSheet.create({
   row:      { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm, paddingVertical: 11, borderTopWidth: 1, borderTopColor: colors.borderLight },
   iconWrap: { width: 30, height: 30, borderRadius: radius.sm, backgroundColor: colors.background, alignItems: "center", justifyContent: "center", marginTop: 1 },
@@ -333,11 +691,11 @@ const styles = StyleSheet.create({
   emptyBody:    { fontSize: font.sizes.sm, color: colors.textSecondary, textAlign: "center", marginTop: 4, lineHeight: 20 },
 
   // Summary
-  summaryRow:     { flexDirection: "row", paddingHorizontal: spacing.md, gap: spacing.sm, marginBottom: spacing.md },
-  summaryCard:    { flex: 1, backgroundColor: colors.card, borderRadius: radius.xl, padding: spacing.md, alignItems: "center", gap: spacing.xs, ...shadow.card },
+  summaryRow:      { flexDirection: "row", paddingHorizontal: spacing.md, gap: spacing.sm, marginBottom: spacing.md },
+  summaryCard:     { flex: 1, backgroundColor: colors.card, borderRadius: radius.xl, padding: spacing.md, alignItems: "center", gap: spacing.xs, ...shadow.card },
   summaryIconWrap: { width: 36, height: 36, borderRadius: radius.md, alignItems: "center", justifyContent: "center" },
-  summaryValue:   { fontSize: font.sizes.xl, fontWeight: "800" },
-  summaryLabel:   { fontSize: 10, color: colors.textSecondary, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 },
+  summaryValue:    { fontSize: font.sizes.xl, fontWeight: "800" },
+  summaryLabel:    { fontSize: 10, color: colors.textSecondary, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 },
 
   // Day picker
   dayRow:         { paddingHorizontal: spacing.md, gap: spacing.sm, paddingBottom: spacing.md },
@@ -357,7 +715,6 @@ const styles = StyleSheet.create({
   statusBadge:    { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: radius.full },
   statusDot:      { width: 6, height: 6, borderRadius: 3 },
   statusBadgeText: { fontSize: font.sizes.xs, fontWeight: "700" },
-
   timeBlock:      { flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: colors.primaryLight, borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: 12, marginBottom: 4 },
   timeBlockLeft:  { flexDirection: "row", alignItems: "center", gap: spacing.sm },
   timeText:       { fontSize: font.sizes.md, fontWeight: "700", color: colors.primary },
@@ -365,7 +722,7 @@ const styles = StyleSheet.create({
   durationText:   { fontSize: font.sizes.sm, fontWeight: "700", color: colors.primary },
 
   // All shifts list
-  section:        { paddingHorizontal: spacing.md, marginBottom: spacing.xxl },
+  section:        { paddingHorizontal: spacing.md, marginBottom: spacing.md },
   sectionTitle:   { fontSize: font.sizes.base, fontWeight: "700", color: colors.text, marginBottom: spacing.sm },
   shiftList:      { backgroundColor: colors.card, borderRadius: radius.xl, paddingHorizontal: spacing.md, ...shadow.card },
   shiftRow:       { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 13 },
